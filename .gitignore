@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+!.env.example
+umami-data/
+data/
+store.json
+store.json.*.tmp
+*.log
+.DS_Store
+Umami-Passport.html
+umami-passport.zip

@@ -1,0 +1,15 @@
+{
+  "name": "umami-passport",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "An interactive Umami Passport loyalty app prototype.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "build": "node build.js"
+  }
+}

@@ -1,0 +1,12 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {CATEGORIES,PRODUCTS,emptyPassport,normalizePassport,cartTotal,placeOrder,redeemReward} from '../src/loyalty.js';
+const date='2026-10-19T12:00:00.000Z';
+test('new passports have no pre-awarded stamps or rewards',()=>{assert.deepEqual(emptyPassport().stamps,{});assert.equal(emptyPassport().redeemed,false);});
+test('one order awards at most one stamp per category',()=>{const {state,earned}=placeOrder(emptyPassport(),{'salmon-maki':2,'garden-maki':1},date);assert.deepEqual(earned,['maki']);assert.deepEqual(state.stamps,{maki:date});assert.equal(state.directOrders,1);assert.equal(state.orders[0].total,3550);});
+test('repeat category orders do not duplicate stamps',()=>{const first=placeOrder(emptyPassport(),{onigiri:1},date).state;const second=placeOrder(first,{onigiri:1,poke:1},date);assert.deepEqual(second.earned,[]);assert.equal(second.state.directOrders,2);assert.equal(Object.keys(second.state.stamps).length,1);assert.equal(first.directOrders,1);});
+test('all six food categories unlock one demo reward',()=>{const cart=Object.fromEntries(CATEGORIES.map(c=>[PRODUCTS.find(p=>p.category===c.id).id,1]));const full=placeOrder(emptyPassport(),cart,date).state;assert.equal(Object.keys(full.stamps).length,6);const redeemed=redeemReward(full);assert.equal(redeemed.redeemed,true);assert.throws(()=>redeemReward(redeemed),/already redeemed/);assert.equal(full.redeemed,false);});
+test('incomplete passports cannot redeem',()=>assert.throws(()=>redeemReward(emptyPassport()),/all six/));
+test('empty, unknown, zero, fractional and negative items cannot create orders',()=>{for(const cart of [{},{missing:1},{onigiri:0},{onigiri:-1},{onigiri:1.2}])assert.throws(()=>placeOrder(emptyPassport(),cart,date),/Add something/);});
+test('cart uses integer cents and valid quantities only',()=>assert.equal(cartTotal({'salmon-maki':2,onigiri:3,unknown:10,ramen:-1}),4450));
+test('invalid storage is safely normalized and cannot invent completion',()=>{assert.deepEqual(normalizePassport(null),emptyPassport());const state=normalizePassport({name:'a'.repeat(90),stamps:{maki:date,bad:date,fish:'invalid'},directOrders:-1,redeemed:true,orders:[{total:-10},null]});assert.equal(state.name.length,30);assert.deepEqual(state.stamps,{maki:date});assert.equal(state.redeemed,false);assert.equal(state.directOrders,0);assert.deepEqual(state.orders,[]);});
