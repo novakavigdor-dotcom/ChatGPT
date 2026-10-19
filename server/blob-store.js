@@ -2,7 +2,7 @@ import { getStore } from '@netlify/blobs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { emptyStore, prepareStore } from './store.js';
 
-function unavailable(message = 'Passport storage is temporarily unavailable. Please try again.') {
+function unavailable(message = 'Bingo storage is temporarily unavailable. Please try again.') {
   const error = new Error(message);
   error.name = 'StorageUnavailableError';
   error.status = 503;
@@ -63,6 +63,6 @@ export class BlobStore {
       if (saved?.modified !== false) throw unavailable();
       if (attempt + 1 < this.maxAttempts) await this.retryDelay(attempt);
     }
-    throw unavailable('The passport was updated at the same time. Please try saving again.');
+    throw unavailable('The bingo was updated at the same time. Please try saving again.');
   }
 }

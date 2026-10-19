@@ -8,7 +8,7 @@ export function emptyStore() {
 
 export function prepareStore(state) {
   if (state?.version !== 1 || !state.customers || !state.sessions || !state.requests) {
-    throw new Error('The private passport store has an unsupported format.');
+    throw new Error('The private bingo store has an unsupported format.');
   }
   state.authAttempts ||= {};
   return state;

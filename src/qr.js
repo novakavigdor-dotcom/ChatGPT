@@ -1,5 +1,5 @@
 /**
- * Offline QR support for Umami Passport.
+ * Offline QR support for Umami Bingo.
  * Vendored qrcode-generator 1.4.4 (MIT): https://github.com/kazuhikoarase/qrcode-generator
  * Vendored jsQR 1.4.0 (Apache-2.0): https://github.com/cozmo/jsQR
  * The following wrappers adapt the published CommonJS/UMD packages to ES modules.
@@ -12649,9 +12649,9 @@ function escapeQrAttribute(value) {
 }
 
 /** Make a local, offline QR code with a four-module quiet zone. */
-export function renderQr(payload, { size = 256, label = 'Your Umami Passport QR code' } = {}) {
+export function renderQr(payload, { size = 256, label = 'Your Umami Bingo QR code' } = {}) {
   if (typeof payload !== 'string' || !payload || payload.length > 1000) {
-    throw new TypeError('The passport QR code must contain between 1 and 1,000 characters.');
+    throw new TypeError('The bingo QR code must contain between 1 and 1,000 characters.');
   }
   const code = umamiQrEncoder(0, 'M');
   code.addData(payload, 'Byte');
@@ -12682,15 +12682,15 @@ function cameraMessage(error) {
     return 'Camera permission was blocked. Allow camera access in your browser and tap Scan again.';
   }
   if (error?.name === 'NotFoundError' || error?.name === 'DevicesNotFoundError') {
-    return 'No camera was found. Use a phone camera or enter the customer’s passport code.';
+    return 'No camera was found. Use a phone camera or enter the customer’s bingo code.';
   }
   if (error?.name === 'NotReadableError' || error?.name === 'TrackStartError') {
-    return 'The camera is busy. Close other camera apps and try again, or enter the passport code.';
+    return 'The camera is busy. Close other camera apps and try again, or enter the bingo code.';
   }
   if (error?.name === 'SecurityError') {
-    return 'Camera scanning needs a secure HTTPS connection or localhost. You can also enter the passport code.';
+    return 'Camera scanning needs a secure HTTPS connection or localhost. You can also enter the bingo code.';
   }
-  return error?.message || 'The camera could not start. Try again or enter the customer’s passport code.';
+  return error?.message || 'The camera could not start. Try again or enter the customer’s bingo code.';
 }
 
 /**
@@ -12701,7 +12701,7 @@ function cameraMessage(error) {
 export async function startQrScanner(videoElement, onResult, { signal } = {}) {
   if (!videoElement || typeof onResult !== 'function') throw new TypeError('The scanner needs a video element and result callback.');
   if (!globalThis.isSecureContext || !globalThis.navigator?.mediaDevices?.getUserMedia) {
-    throw new Error('Camera scanning needs a secure HTTPS connection or localhost. You can also enter the customer’s passport code.');
+    throw new Error('Camera scanning needs a secure HTTPS connection or localhost. You can also enter the customer’s bingo code.');
   }
   if (signal?.aborted) throw new DOMException('Camera scanning was closed.', 'AbortError');
 
@@ -12711,7 +12711,7 @@ export async function startQrScanner(videoElement, onResult, { signal } = {}) {
   let stopped = false;
   const canvas = document.createElement('canvas');
   const context = canvas.getContext('2d', { willReadFrequently: true });
-  if (!context) throw new Error('This browser cannot read camera images. Enter the customer’s passport code instead.');
+  if (!context) throw new Error('This browser cannot read camera images. Enter the customer’s bingo code instead.');
 
   const stop = () => {
     stopped = true;

@@ -5,8 +5,8 @@ import { spawnSync } from 'node:child_process';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const outputDirectory = resolve(root, '..');
-const outputFile = resolve(outputDirectory, 'Umami-Passport.html');
-const zipFile = resolve(outputDirectory, 'umami-passport.zip');
+const outputFile = resolve(outputDirectory, 'Umami-Bingo.html');
+const zipFile = resolve(outputDirectory, 'umami-bingo.zip');
 const moduleNames = ['loyalty', 'qr', 'owner', 'app'];
 
 async function walk(directory) {
@@ -114,7 +114,7 @@ def safe(item):
     return (item.is_file() and not item.is_symlink() and item.resolve().is_relative_to(root)
             and not any(part.startswith('.') or part in excluded for part in parts))
 with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as bundle:
-    bundle.write(standalone, 'Umami-Passport.html')
+    bundle.write(standalone, 'Umami-Bingo.html')
     for name in individual:
         item = root / name
         if safe(item): bundle.write(item, 'source/' + str(item.relative_to(root)))

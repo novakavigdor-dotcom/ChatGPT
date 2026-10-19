@@ -20,3 +20,46 @@ body.signup-open:after{content:'';position:fixed;inset:0;z-index:40;background:#
 .passport-counter-seal{height:60px;width:60px;display:grid;place-items:center;border:1px solid #bdc5a8;border-radius:50%;color:#8d9b74;background:#e7ebdc;flex-shrink:0}
 .passport-counter-seal svg{width:26px;height:26px}
 @media(max-width:560px){#modal.signup-form-modal[open]{top:87px;max-height:calc(100dvh - 103px)}.qr-free-square{padding:5px 5px 16px}.free-square.qr-free-square small{font-size:5.5px;letter-spacing:.2px;bottom:3px}.passport-counter-seal{height:49px;width:49px}.passport-counter-seal svg{width:24px;height:24px}}
+/* Umami Sushi's printed 4 × 4 menu bingo, adapted for a live account. */
+.passport-page.bingo-page{display:block;max-width:790px;margin:0 auto}
+.menu-bingo.paper-passport{display:block;grid-column:auto;grid-row:auto;padding:0;border:1px solid #ddd5cc;border-radius:0;background:#fff;box-shadow:0 8px 30px #35231c08;overflow:hidden}
+.bingo-masthead{background:#171717;text-align:center;padding:24px 20px 17px;color:#fff}
+.bingo-masthead img{width:180px;max-width:48%;height:auto;display:block;margin:0 auto 6px}
+.bingo-masthead h1{font:800 47px/1.1 var(--sans);letter-spacing:2px;margin:10px 0 0;color:#fff}
+.bingo-tagline{text-align:center;font-size:16px;line-height:1.6;color:#272727;margin:20px 24px 0}
+.bingo-identity{display:flex;align-items:center;gap:24px;margin:12px 36px 18px}
+.bingo-identity .passport-name{margin:0;flex:1;min-width:0;font-size:14px}
+.bingo-identity .passport-name b{font-size:13px;color:#242424}
+.bingo-identity .passport-name>span{border-color:#9e9992}
+.bingo-qr-badge{padding:2px 2px 0;flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:0;color:#8e7c63;line-height:1;background:#fff}
+.bingo-qr-badge>.passport-qr{width:96px;height:96px}
+.bingo-qr-badge>svg:not(.passport-qr){width:64px;height:64px;margin:16px;color:#999683;stroke-width:1}
+.bingo-qr-badge small{display:block;font-size:6px;letter-spacing:.6px;margin-top:2px}
+.menu-bingo .bingo-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:0;border:1px solid #cec6be;margin:0 36px}
+.menu-bingo .bingo-square{aspect-ratio:1.24;min-height:118px;padding:15px 7px 20px;border:0;border-right:1px solid #cec6be;border-bottom:1px solid #cec6be;border-radius:0;outline:none;box-shadow:none;background:#fff}
+.menu-bingo .bingo-square:nth-child(8n+1),.menu-bingo .bingo-square:nth-child(8n+3),.menu-bingo .bingo-square:nth-child(8n+6),.menu-bingo .bingo-square:nth-child(8n+8){background:#f8f5f0}
+.menu-bingo .bingo-square:nth-child(4n){border-right:0}
+.menu-bingo .bingo-square:nth-last-child(-n+4){border-bottom:0}
+.menu-bingo .bingo-square strong{font-size:16px;font-weight:750;letter-spacing:-.2px;text-transform:none;line-height:1.3;color:#202020;overflow-wrap:normal}
+.menu-bingo .square-description{font-size:11px;line-height:1.5;color:#85817c;margin-top:7px}
+.menu-bingo .bingo-square>small{font-size:7px;bottom:6px}
+.menu-bingo .bingo-square:hover{background:#f0eee6}
+.menu-bingo .bingo-square.stamped{background:#f3e5e4;box-shadow:inset 0 0 0 2px #6a9471}
+.menu-bingo .bingo-square.stamped .square-description{color:#997a78}
+.menu-bingo .stamp-ring{height:76px;width:76px;opacity:.4;border-color:#b63e4c;box-shadow:none}
+.menu-bingo .stamp-ring>span{font-size:10px}.menu-bingo .stamp-ring>b{font-size:23px}
+.pdf-reward-strip{background:#bb232c;border-radius:11px;text-align:center;color:#fff;padding:17px 15px;margin:22px 36px 0}
+.pdf-reward-strip strong{font-size:26px;font-weight:800;line-height:1.4;display:block;letter-spacing:.3px}
+.pdf-reward-strip b{font-size:23px;font-weight:750;line-height:1.5;display:block}
+.bingo-rules{text-align:center;padding:0 30px}
+.bingo-rules>p{font-size:15px;color:#292929;margin:16px 0 11px;line-height:1.7}
+.bingo-rules>small{display:block;font-size:12px;color:#514b46;line-height:1.8}
+.bingo-rules>a{display:block;color:#b32630;font-size:19px;font-weight:750;text-decoration:none;margin:18px auto 5px}
+.menu-bingo .card-bottom{margin:0 36px;padding:15px 0 16px;color:#939080;font-size:9px}
+.menu-bingo .bingo-result{margin:20px 36px 0;border-radius:8px;padding:13px 20px}
+.menu-bingo .bingo-result h2{font-size:17px}.menu-bingo .bingo-result p{font-size:11px}
+.bingo-account-row{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;margin:19px 1px 0}
+.bingo-account-row .account-link{margin:0;font-size:10px;display:block;width:auto;text-align:right}
+.bingo-account-row .secondary{font-size:11px;background:#fffdf7;border-color:#d7d2c6}
+@media(max-width:850px){.passport-page.bingo-page{max-width:670px}.bingo-masthead h1{font-size:40px}.pdf-reward-strip strong{font-size:22px}.pdf-reward-strip b{font-size:20px}}
+@media(max-width:560px){.menu-bingo.paper-passport{border-radius:0}.bingo-masthead{padding:16px 12px 15px}.bingo-masthead img{width:130px;max-width:47%;margin-bottom:4px}.bingo-masthead h1{font-size:29px;letter-spacing:1.6px;margin-top:7px}.bingo-tagline{font-size:11px;line-height:1.6;margin:14px 12px 0}.bingo-identity{margin:10px 14px 14px;gap:8px}.bingo-identity .passport-name{font-size:11px;gap:5px;align-items:center}.bingo-identity .passport-name b{font-size:9px}.bingo-identity .passport-name button{padding:3px}.bingo-identity .passport-name svg{width:13px;height:13px}.bingo-qr-badge>.passport-qr{width:86px;height:86px}.bingo-qr-badge>svg:not(.passport-qr){height:54px;width:54px;margin:16px}.bingo-qr-badge small{font-size:5px;letter-spacing:.4px}.menu-bingo .bingo-grid{margin:0 14px}.menu-bingo .bingo-square{aspect-ratio:auto;min-height:88px;padding:10px 4px 15px}.menu-bingo .bingo-square strong{font-size:10px;line-height:1.3;letter-spacing:-.1px;overflow-wrap:normal}.menu-bingo .square-description{font-size:7.6px;line-height:1.55;margin-top:5px}.menu-bingo .bingo-square>small{font-size:5px;bottom:5px;letter-spacing:.5px}.menu-bingo .stamp-ring{width:51px;height:51px;top:44%}.menu-bingo .stamp-ring>span{font-size:7px}.menu-bingo .stamp-ring>b{font-size:15px}.pdf-reward-strip{margin:17px 14px 0;padding:13px 8px;border-radius:7px}.pdf-reward-strip strong{font-size:14px;letter-spacing:0;line-height:1.5}.pdf-reward-strip b{font-size:13px;line-height:1.6}.bingo-rules{padding:0 14px}.bingo-rules>p{font-size:10px;line-height:1.7;margin:13px 0 9px}.bingo-rules>small{font-size:9px;line-height:1.7}.bingo-rules>a{font-size:15px;margin:14px auto 2px}.menu-bingo .card-bottom{margin:0 14px;padding:13px 0;font-size:7px}.menu-bingo .card-bottom button{font-size:7px}.menu-bingo .bingo-result{margin:15px 14px 0;padding:11px 13px}.menu-bingo .bingo-result h2{font-size:15px}.menu-bingo .bingo-result p{font-size:10px}.bingo-account-row{margin-top:16px;gap:13px}.bingo-account-row .secondary{font-size:10px;padding:10px 12px}.bingo-account-row .account-link{font-size:9px;text-align:left;width:100%;padding-left:2px}}

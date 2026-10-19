@@ -67,8 +67,8 @@ export function createNetlifyHandler({ storeFactory = () => new BlobStore(), app
       });
     } catch (error) {
       // Do not expose store contents, credentials, or provider error URLs.
-      console.error('Passport function failed:', error.name || 'Error');
-      return failure('Passport storage is temporarily unavailable. Please try again.');
+      console.error('Bingo function failed:', error.name || 'Error');
+      return failure('Bingo storage is temporarily unavailable. Please try again.');
     }
   };
 }

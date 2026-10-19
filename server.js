@@ -11,6 +11,7 @@ import { CATEGORIES, getBingoStatus } from './src/loyalty.js';
 
 const deriveKey = promisify(scrypt);
 const root = dirname(fileURLToPath(import.meta.url));
+// Keep the original private storage location so the rename preserves accounts.
 const defaultDataDir = process.platform === 'win32'
   ? resolve(process.env.LOCALAPPDATA || resolve(homedir(), 'AppData', 'Local'), 'UmamiPassport')
   : '/workspace/umami-data';
@@ -23,19 +24,19 @@ class APIError extends Error {
 function fail(status, message) { throw new APIError(status, message); }
 const digest = (value) => createHash('sha256').update(value).digest('hex');
 function normalizeCode(value) {
-  if (typeof value !== 'string') fail(400, 'Enter a customer passport code.');
+  if (typeof value !== 'string') fail(400, 'Enter a customer bingo code.');
   const code = value.trim().replace(/^UMAMI\s*:/i, '').replace(/[\s-]/g, '').toUpperCase();
-  if (!/^[A-F0-9]{32}$/.test(code)) fail(400, 'This is not a valid Umami Passport QR code.');
+  if (!/^[A-F0-9]{32}$/.test(code)) fail(400, 'This is not a valid Umami Bingo QR code.');
   return code;
 }
 function publicCustomer(customer) {
   const { id, code, version, firstName = '', lastName = '', email = '', name, stamps, directOrders, orders, redeemed, redeemedDiscount = 0 } = customer;
   const needsProfile = !firstName || !lastName || !email || !customer.recoveryHash;
-  return { id, code, version, firstName, lastName, email, name, needsProfile, stamps: { ...stamps }, directOrders, orders: structuredClone(orders), redeemed, redeemedDiscount, bingo: getBingoStatus(stamps) };
+  return { id, code, version, firstName, lastName, email, name, needsProfile, stamps: { ...stamps }, directOrders, orders: structuredClone(orders), corrections: structuredClone(customer.corrections || []), redeemed, redeemedDiscount, bingo: getBingoStatus(stamps) };
 }
 function findCustomer(state, code) {
   const customer = Object.values(state.customers).find((entry) => entry.code === code);
-  if (!customer) fail(404, 'No customer found for this passport code.');
+  if (!customer) fail(404, 'No customer found for this bingo code.');
   return customer;
 }
 function profileFrom(body) {
@@ -64,12 +65,14 @@ function applyProfile(state, customer, profile) {
   return secret.recoveryCode;
 }
 function migrateCustomer(customer) {
-  if (customer.version >= 2) return;
+  if (customer.version >= 3) return;
   // The old broad categories cannot prove which new bingo item was bought.
   // Preserve that history while retaining only exact matching paid squares.
   customer.legacyStamps = { ...customer.legacyStamps, ...customer.stamps };
-  customer.stamps = Object.fromEntries(Object.entries(customer.stamps || {}).filter(([key]) => ['maki', 'platter'].includes(key)));
-  customer.version = 2;
+  const retainedIds = customer.version === 2 ? ['maki', 'poke', 'gyoza', 'onigiri', 'platter'] : ['maki', 'platter'];
+  customer.stamps = Object.fromEntries(Object.entries(customer.stamps || {}).filter(([key, date]) => retainedIds.includes(key) && typeof date === 'string' && !Number.isNaN(Date.parse(date))));
+  customer.version = 3;
+  customer.corrections ||= [];
   customer.firstName ||= '';
   customer.lastName ||= '';
   customer.email ||= '';
@@ -97,7 +100,7 @@ function cookies(request) {
 function session(state, request, role) {
   const token = cookies(request)[`umami_${role}`];
   const entry = token && state.sessions[digest(token)];
-  if (!entry || entry.role !== role || entry.expires <= Date.now()) fail(401, role === 'owner' ? 'Sign in as the owner to continue.' : 'Create or open your customer passport first.');
+  if (!entry || entry.role !== role || entry.expires <= Date.now()) fail(401, role === 'owner' ? 'Sign in as the owner to continue.' : 'Create or open your customer bingo card first.');
   return entry;
 }
 function newSessionCookie(state, request, role, customerId, secureCookies = false) {
@@ -163,7 +166,7 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
   }
   const store = injectedStore || new Store(dataDir);
   await store.ready;
-  if (await store.read((state) => Object.values(state.customers).some((customer) => customer.version < 2))) {
+  if (await store.read((state) => Object.values(state.customers).some((customer) => customer.version < 3))) {
     await store.transaction((state) => { for (const customer of Object.values(state.customers)) migrateCustomer(customer); });
   }
   if (ownerPassword) {
@@ -214,7 +217,7 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
     if (route === 'POST /api/customer') {
       const profile = profileFrom(body);
       const result = await store.transaction((state) => {
-        // Repeated setup taps should not silently replace an existing passport.
+        // Repeated setup taps should not silently replace an existing bingo card.
         try {
           const auth = session(state, request, 'customer');
           const customer = state.customers[auth.customerId];
@@ -223,7 +226,7 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
           return { payload: { customer: publicCustomer(customer), ...(recoveryCode ? { recoveryCode } : {}) } };
         } catch (error) { if (error.status !== 401) throw error; }
         const id = randomUUID();
-        const customer = { id, code: randomBytes(16).toString('hex').toUpperCase(), version: 2, stamps: {}, directOrders: 0, orders: [], redeemed: false, redeemedDiscount: 0 };
+        const customer = { id, code: randomBytes(16).toString('hex').toUpperCase(), version: 3, stamps: {}, directOrders: 0, orders: [], corrections: [], redeemed: false, redeemedDiscount: 0 };
         const recoveryCode = applyProfile(state, customer, profile);
         state.customers[id] = customer;
         return { cookie: newSessionCookie(state, request, 'customer', id, secureCookies), payload: { customer: publicCustomer(customer), recoveryCode } };
@@ -301,28 +304,60 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       if (typeof body.directOrder !== 'boolean') fail(400, 'Specify whether this was a direct order.');
       if (typeof body.requestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.requestId)) fail(400, 'A valid request ID is required to save this visit.');
       const categories = [...new Set(body.categories)].sort();
-      const fingerprint = digest(JSON.stringify({ code, categories, directOrder: body.directOrder }));
+      const fingerprint = digest(JSON.stringify({ operation: 'award', code, categories, directOrder: body.directOrder }));
       const previous = state.requests[body.requestId];
       if (previous) {
-        if (previous.fingerprint !== fingerprint) fail(409, 'This request ID was already used for a different visit.');
+        const legacyFingerprint = !previous.operation && digest(JSON.stringify({ code, categories, directOrder: body.directOrder }));
+        if (previous.fingerprint !== fingerprint && previous.fingerprint !== legacyFingerprint) fail(409, 'This request ID was already used for a different visit.');
         return { customer: publicCustomer(findCustomer(state, code)), earned: previous.earned, repeated: true };
       }
       const customer = findCustomer(state, code);
-      const date = new Date().toISOString();
+      // Distinct visits need distinct dates so a stale correction cannot remove
+      // a legitimate re-award that happened within the same clock millisecond.
+      const previousVisit = Date.parse(customer.orders[0]?.date);
+      const date = new Date(Math.max(Date.now(), Number.isNaN(previousVisit) ? 0 : previousVisit + 1)).toISOString();
       const earned = categories.filter((category) => !customer.stamps[category]);
       for (const category of earned) customer.stamps[category] = date;
       if (body.directOrder) customer.directOrders += 1;
       customer.orders.unshift({ id: randomUUID(), date, total: 0, categories, directOrder: body.directOrder });
       customer.orders = customer.orders.slice(0, 50);
-      state.requests[body.requestId] = { fingerprint, earned, date };
+      state.requests[body.requestId] = { operation: 'award', fingerprint, earned, date };
       return { customer: publicCustomer(customer), earned };
+    }));
+    if (route === 'POST /api/owner/stamps/remove') return json(response, await store.transaction((state) => {
+      session(state, request, 'owner');
+      const code = normalizeCode(body.code);
+      if (!Array.isArray(body.categories) || body.categories.length === 0 || body.categories.length > categoryIds.length || body.categories.some((category) => !categoryIds.includes(category))) fail(400, 'Select at least one valid category to correct.');
+      if (typeof body.requestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.requestId)) fail(400, 'A valid request ID is required to save this correction.');
+      const categories = [...new Set(body.categories)].sort();
+      const expected = body.expectedStamps;
+      if (!expected || typeof expected !== 'object' || Array.isArray(expected) || categories.some((category) => !Object.hasOwn(expected, category) || typeof expected[category] !== 'string' || Number.isNaN(Date.parse(expected[category])))) fail(400, 'Include the original stamp date for each category being corrected.');
+      const expectedStamps = Object.fromEntries(categories.map((category) => [category, expected[category]]));
+      const fingerprint = digest(JSON.stringify({ operation: 'remove', code, categories, expectedStamps }));
+      const previous = state.requests[body.requestId];
+      if (previous) {
+        if (previous.operation !== 'remove' || previous.fingerprint !== fingerprint) fail(409, 'This request ID was already used for a different change.');
+        return { customer: publicCustomer(findCustomer(state, code)), removed: previous.removed, repeated: true };
+      }
+      const customer = findCustomer(state, code);
+      if (categories.some((category) => customer.stamps[category] && customer.stamps[category] !== expectedStamps[category])) fail(409, 'A selected stamp has changed. Reload this customer before correcting it.');
+      const removed = categories.filter((category) => customer.stamps[category]);
+      const previousStamps = Object.fromEntries(removed.map((category) => [category, customer.stamps[category]]));
+      for (const category of removed) delete customer.stamps[category];
+      const date = new Date().toISOString();
+      if (removed.length) {
+        customer.corrections ||= [];
+        customer.corrections.push({ id: body.requestId, date, categories: removed, previousStamps, actor: 'owner' });
+      }
+      state.requests[body.requestId] = { operation: 'remove', fingerprint, removed, date };
+      return { customer: publicCustomer(customer), removed };
     }));
     if (route === 'POST /api/owner/redeem') return json(response, await store.transaction((state) => {
       session(state, request, 'owner');
       const customer = findCustomer(state, normalizeCode(body.code));
       if (customer.redeemed) fail(409, 'This customer has already redeemed the reward.');
       const { discount } = getBingoStatus(customer.stamps);
-      if (!discount) fail(409, 'Complete a bingo line for 10% off or all eight paid squares for 25% off.');
+      if (!discount) fail(409, `Complete a bingo line for 10% off or all ${categoryIds.length} food squares for 25% off.`);
       customer.redeemed = true;
       customer.redeemedDiscount = discount;
       customer.redeemedAt = new Date().toISOString();
@@ -377,6 +412,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const port = Number(process.env.PORT || 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be a number between 1 and 65535.');
   const { server } = await createApp();
-  server.listen(port, '0.0.0.0', () => console.log(`Umami Passport is ready at http://localhost:${port}`));
+  server.listen(port, '0.0.0.0', () => console.log(`Umami Bingo is ready at http://localhost:${port}`));
   for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => server.close(() => process.exit(0)));
 }

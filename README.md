@@ -1,10 +1,10 @@
-# Umami Passport
+# Umami Bingo
 
-A customer loyalty app with personal QR codes, an owner scanner, and a 3×3 food bingo card. A completed line earns 10% off; all eight food squares earn 25% off. The centre square is free.
+A customer loyalty app with personal QR codes, an owner scanner, and a 4×4 food bingo card. All 16 squares are food categories. Complete any row, column, or diagonal of four stamps for 10% off, or collect all 16 for 25% off. Each card can redeem one reward. The customer's personal QR code sits above the grid, leaving all 16 food squares available.
 
 ## Deploy the working app on Netlify
 
-Use a **GitHub-connected Netlify deployment**. Uploading the HTML or a static folder alone does not deploy the API needed for signup and shared passports.
+Use a **GitHub-connected Netlify deployment**. Uploading the HTML or a static folder alone does not deploy the API needed for signup and shared bingo cards.
 
 1. Connect this repository to the Netlify site and deploy the `main` branch. The included `netlify.toml` sets the build command to `npm run build:web`, the publish directory to `dist`, and the Functions directory to `netlify/functions`.
 2. Open `/api/health` on the deployed site; it should return `{"ready":true}`.
@@ -17,11 +17,13 @@ The `dist` directory contains only public HTML, styles, browser JavaScript, imag
 ## Customer and owner workflow
 
 1. Customers open `/customer`, enter first name, last name, and email, then save their private recovery code. Email is recorded for the account; the app does not send email or verify the address.
-2. At the counter, the customer shows the personal QR code in their free centre square, or their public customer code. Tap the centre square to enlarge the QR code.
+2. At the counter, the customer shows the personal QR code above their bingo card, or their public customer code. Tap the QR code to enlarge it.
 3. The owner opens `/owner`, enters their owner access code, allows the camera, scans the customer's QR code or enters the customer code, selects the qualifying food squares, and confirms the visit.
 4. The customer's card updates automatically within a few seconds. The owner can record the eligible discount redemption.
 
-The public QR code identifies a passport to staff. It does not sign the customer in. Customers use their email and **private recovery code** to reopen the same passport on another browser. Keep that recovery code private and save it when shown; the app does not email it.
+The public QR code identifies the customer's bingo card to staff. It does not sign the customer in. Customers use their email and **private recovery code** to reopen the same account on another browser. Keep that recovery code private and save it when shown; the app does not email it.
+
+To correct a mistaken stamp, open the customer's card, choose **Correct stamps**, and untick the mistaken saved squares. Choose **Remove N stamps**, review the warning, then choose **Confirm removal**. Nothing changes until confirmation. If another staff member changed the card, choose **Reload bingo** and review the current stamps before retrying. The customer sees the corrected card automatically. Corrections preserve visit and redemption history; removing stamps does not reset a redeemed reward or allow another redemption on the same card.
 
 Phone camera scanning requires HTTPS and camera permission. Manual customer-code entry works when scanning is unavailable. Owner and customer devices must use the same deployed site.
 
@@ -33,7 +35,7 @@ After the deployment completes, refresh the app and open `/owner` directly. Succ
 
 ## Start locally on Windows
 
-Install Node.js **22.12 or newer**. On GitHub choose **Code → Download ZIP**, extract it, and open the folder containing `package.json`. For the separate `umami-passport.zip` bundle, open its `source` folder. Open a terminal there and paste:
+Install Node.js **22.12 or newer**. On GitHub choose **Code → Download ZIP**, extract it, and open the folder containing `package.json`. For the separate `umami-bingo.zip` bundle, open its `source` folder. Open a terminal there and paste:
 
 ```powershell
 npm ci
@@ -55,7 +57,7 @@ npm run build:web
 npm run build
 ```
 
-`build:web` creates only the public `dist` directory for Netlify. `build` creates `Umami-Passport.html` in the parent folder and, with Python 3 available, `umami-passport.zip` containing the app and source, including deployment configuration and the private backend verifier module. Downloads exclude private customer records, session data, and the plaintext owner access code. The verifier is packaged with the server source and Function, never the public site or standalone HTML.
+`build:web` creates only the public `dist` directory for Netlify. `build` creates `Umami-Bingo.html` in the parent folder and, with Python 3 available, `umami-bingo.zip` containing the app and source, including deployment configuration and the private backend verifier module. Downloads exclude private customer records, session data, and the plaintext owner access code. The verifier is packaged with the server source and Function, never the public site or standalone HTML.
 
 The standalone HTML opens in a current Chrome or Edge browser without installation. It embeds browser code, QR tools, images, fonts, and licenses. It is an offline demonstration confined to the same browser; it cannot sync devices or authenticate the owner against the server. Use the hosted app for customer accounts and the shared owner system.
 
