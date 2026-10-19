@@ -6,13 +6,14 @@ import { homedir } from 'node:os';
 import { randomBytes, randomUUID, createHash, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { Store } from './server/store.js';
+import { CATEGORIES, getBingoStatus } from './src/loyalty.js';
 
 const deriveKey = promisify(scrypt);
 const root = dirname(fileURLToPath(import.meta.url));
 const defaultDataDir = process.platform === 'win32'
   ? resolve(process.env.LOCALAPPDATA || resolve(homedir(), 'AppData', 'Local'), 'UmamiPassport')
   : '/workspace/umami-data';
-const CATEGORIES = ['maki', 'rice', 'noodles', 'fish', 'platter', 'chef'];
+const categoryIds = CATEGORIES.map((category) => category.id);
 const contentTypes = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.ttf': 'font/ttf', '.woff': 'font/woff', '.woff2': 'font/woff2' };
 
 class APIError extends Error {
@@ -27,19 +28,51 @@ function normalizeCode(value) {
   return code;
 }
 function publicCustomer(customer) {
-  const { id, code, version, name, stamps, directOrders, orders, redeemed } = customer;
-  return { id, code, version, name, stamps: { ...stamps }, directOrders, orders: structuredClone(orders), redeemed };
+  const { id, code, version, firstName = '', lastName = '', email = '', name, stamps, directOrders, orders, redeemed, redeemedDiscount = 0 } = customer;
+  const needsProfile = !firstName || !lastName || !email || !customer.recoveryHash;
+  return { id, code, version, firstName, lastName, email, name, needsProfile, stamps: { ...stamps }, directOrders, orders: structuredClone(orders), redeemed, redeemedDiscount, bingo: getBingoStatus(stamps) };
 }
 function findCustomer(state, code) {
   const customer = Object.values(state.customers).find((entry) => entry.code === code);
   if (!customer) fail(404, 'No customer found for this passport code.');
   return customer;
 }
-function nameFrom(body) {
-  if (body.name !== undefined && typeof body.name !== 'string') fail(400, 'Enter a valid name.');
-  const name = (body.name || '').trim();
-  if (name.length > 30) fail(400, 'Use a name of 30 characters or fewer.');
-  return name;
+function profileFrom(body) {
+  const firstName = typeof body.firstName === 'string' ? body.firstName.trim() : '';
+  const lastName = typeof body.lastName === 'string' ? body.lastName.trim() : '';
+  const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+  if (!firstName || !lastName || firstName.length > 60 || lastName.length > 60) fail(400, 'Enter your first and last name, up to 60 characters each.');
+  if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(400, 'Enter a valid email address.');
+  return { firstName, lastName, email, name: `${firstName} ${lastName}` };
+}
+function recoverySecret() {
+  const hex = randomBytes(16).toString('hex').toUpperCase();
+  return { recoveryCode: `UMP-${hex.match(/.{4}/g).join('-')}`, recoveryHash: digest(hex) };
+}
+function recoveryHashFrom(value) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().replace(/^UMP[\s:-]*/i, '').replace(/[\s-]/g, '').toUpperCase();
+  return /^[A-F0-9]{32}$/.test(normalized) ? digest(normalized) : null;
+}
+function applyProfile(state, customer, profile) {
+  if (Object.values(state.customers).some((entry) => entry.id !== customer.id && entry.email === profile.email)) fail(409, 'An account already uses this email. Sign in with its private recovery code.');
+  Object.assign(customer, profile);
+  if (customer.recoveryHash) return null;
+  const secret = recoverySecret();
+  customer.recoveryHash = secret.recoveryHash;
+  return secret.recoveryCode;
+}
+function migrateCustomer(customer) {
+  if (customer.version >= 2) return;
+  // The old broad categories cannot prove which new bingo item was bought.
+  // Preserve that history while retaining only exact matching paid squares.
+  customer.legacyStamps = { ...customer.legacyStamps, ...customer.stamps };
+  customer.stamps = Object.fromEntries(Object.entries(customer.stamps || {}).filter(([key]) => ['maki', 'platter'].includes(key)));
+  customer.version = 2;
+  customer.firstName ||= '';
+  customer.lastName ||= '';
+  customer.email ||= '';
+  customer.redeemedDiscount ??= customer.redeemed ? null : 0;
 }
 function passwordFrom(body) {
   if (typeof body.password !== 'string' || body.password.length < 10 || body.password.length > 256) fail(400, 'Use a password between 10 and 256 characters.');
@@ -66,15 +99,15 @@ function session(state, request, role) {
   if (!entry || entry.role !== role || entry.expires <= Date.now()) fail(401, role === 'owner' ? 'Sign in as the owner to continue.' : 'Create or open your customer passport first.');
   return entry;
 }
-function setSession(state, request, response, role, customerId) {
+function newSessionCookie(state, request, role, customerId, secureCookies = false) {
   const token = randomBytes(32).toString('hex');
   const maxAge = role === 'owner' ? 12 * 60 * 60 : 365 * 24 * 60 * 60;
   const old = cookies(request)[`umami_${role}`];
   if (old) delete state.sessions[digest(old)];
   state.sessions[digest(token)] = { role, ...(customerId ? { customerId } : {}), expires: Date.now() + maxAge * 1000 };
   for (const [key, entry] of Object.entries(state.sessions)) if (entry.expires <= Date.now()) delete state.sessions[key];
-  const secure = request.socket.encrypted || process.env.UMAMI_HTTPS === '1';
-  response.setHeader('Set-Cookie', `umami_${role}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure ? '; Secure' : ''}`);
+  const secure = request.socket.encrypted || secureCookies;
+  return `umami_${role}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
 }
 async function bodyFrom(request) {
   if (!/^application\/json(?:;|$)/i.test(request.headers['content-type'] || '')) fail(415, 'Send JSON with Content-Type: application/json.');
@@ -123,26 +156,39 @@ function publicPath(pathname) {
   return null;
 }
 
-export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaultDataDir, ownerPassword = process.env.OWNER_PASSWORD } = {}) {
-  const store = new Store(dataDir);
+export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaultDataDir, store: injectedStore, ownerPassword = process.env.OWNER_PASSWORD, clientAddress = (request) => request.socket.remoteAddress || 'unknown', secureCookies = process.env.UMAMI_HTTPS === '1', allowOwnerSetup = true } = {}) {
+  const store = injectedStore || new Store(dataDir);
   await store.ready;
+  if (await store.read((state) => Object.values(state.customers).some((customer) => customer.version < 2))) {
+    await store.transaction((state) => { for (const customer of Object.values(state.customers)) migrateCustomer(customer); });
+  }
   if (ownerPassword) {
     if (ownerPassword.length < 10 || ownerPassword.length > 256) throw new Error('OWNER_PASSWORD must contain 10 to 256 characters.');
-    await store.transaction(async (state) => { if (!state.owner) state.owner = await passwordRecord(ownerPassword); });
+    if (!await store.read((state) => Boolean(state.owner))) {
+      await store.transaction(async (state) => { if (!state.owner) state.owner = await passwordRecord(ownerPassword); });
+    }
   }
-  const attempts = new Map();
-  function loginRateLimit(request) {
-    const key = request.socket.remoteAddress || 'unknown';
-    const now = Date.now();
-    for (const [address, entry] of attempts) if (now - entry.since >= 15 * 60 * 1000) attempts.delete(address);
-    const entry = attempts.get(key) || { since: now, count: 0 };
-    if (++entry.count > 12) fail(429, 'Too many sign-in attempts. Try again in 15 minutes.');
-    attempts.set(key, entry);
+  async function loginRateLimit(request, scope = 'owner') {
+    const allowed = await store.transaction((state) => {
+      state.authAttempts ||= {};
+      const now = Date.now();
+      for (const [address, entry] of Object.entries(state.authAttempts)) if (now - entry.since >= 15 * 60 * 1000) delete state.authAttempts[address];
+      const key = `${scope}:${digest(String(clientAddress(request)))}`;
+      const entry = state.authAttempts[key] || { since: now, count: 0 };
+      entry.count += 1;
+      state.authAttempts[key] = entry;
+      return entry.count <= 12;
+    });
+    if (!allowed) fail(429, 'Too many sign-in attempts. Try again in 15 minutes.');
+  }
+  function signedIn(response, result, status = 200) {
+    response.setHeader('Set-Cookie', result.cookie);
+    return json(response, result.payload, status);
   }
 
   async function api(request, response, url) {
     const route = `${request.method} ${url.pathname}`;
-    if (route === 'GET /api/status') return json(response, await store.read((state) => ({ ownerConfigured: Boolean(state.owner) })));
+    if (route === 'GET /api/status') return json(response, await store.read((state) => ({ ownerConfigured: Boolean(state.owner), ownerSetupAllowed: allowOwnerSetup })));
     if (route === 'GET /api/health') return json(response, { ready: true });
     if (route === 'GET /api/customer') return json(response, await store.read((state) => {
       const auth = session(state, request, 'customer');
@@ -160,57 +206,86 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
     checkMutationOrigin(request);
     const body = await bodyFrom(request);
     if (route === 'POST /api/customer') {
+      const profile = profileFrom(body);
       const result = await store.transaction((state) => {
         // Repeated setup taps should not silently replace an existing passport.
         try {
           const auth = session(state, request, 'customer');
-          return { customer: publicCustomer(state.customers[auth.customerId]) };
+          const customer = state.customers[auth.customerId];
+          if (customer.email && customer.email !== profile.email) fail(409, 'You are already signed in. Sign out before creating another account.');
+          const recoveryCode = applyProfile(state, customer, profile);
+          return { payload: { customer: publicCustomer(customer), ...(recoveryCode ? { recoveryCode } : {}) } };
         } catch (error) { if (error.status !== 401) throw error; }
         const id = randomUUID();
-        const customer = { id, code: randomBytes(16).toString('hex').toUpperCase(), version: 1, name: nameFrom(body), stamps: {}, directOrders: 0, orders: [], redeemed: false };
+        const customer = { id, code: randomBytes(16).toString('hex').toUpperCase(), version: 2, stamps: {}, directOrders: 0, orders: [], redeemed: false, redeemedDiscount: 0 };
+        const recoveryCode = applyProfile(state, customer, profile);
         state.customers[id] = customer;
-        setSession(state, request, response, 'customer', id);
-        return { customer: publicCustomer(customer) };
+        return { cookie: newSessionCookie(state, request, 'customer', id, secureCookies), payload: { customer: publicCustomer(customer), recoveryCode } };
       });
-      return json(response, result, 201);
+      if (result.cookie) return signedIn(response, result, 201);
+      return json(response, result.payload, 201);
     }
-    if (route === 'PATCH /api/customer') return json(response, await store.transaction((state) => {
-      const auth = session(state, request, 'customer');
-      const customer = state.customers[auth.customerId];
-      customer.name = nameFrom(body);
-      return { customer: publicCustomer(customer) };
-    }));
+    if (route === 'PATCH /api/customer') {
+      const profile = profileFrom(body);
+      return json(response, await store.transaction((state) => {
+        const auth = session(state, request, 'customer');
+        const customer = state.customers[auth.customerId];
+        const recoveryCode = applyProfile(state, customer, profile);
+        return { customer: publicCustomer(customer), ...(recoveryCode ? { recoveryCode } : {}) };
+      }));
+    }
+    if (route === 'POST /api/customer/login') {
+      await loginRateLimit(request, 'customer');
+      const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+      const recoveryHash = recoveryHashFrom(body.recoveryCode);
+      const result = await store.transaction((state) => {
+        const customer = Object.values(state.customers).find((entry) => entry.email === email);
+        if (!customer?.recoveryHash || !recoveryHash || !timingSafeEqual(Buffer.from(customer.recoveryHash, 'hex'), Buffer.from(recoveryHash, 'hex'))) fail(401, 'The email or private recovery code is incorrect.');
+        return { cookie: newSessionCookie(state, request, 'customer', customer.id, secureCookies), payload: { customer: publicCustomer(customer) } };
+      });
+      return signedIn(response, result);
+    }
+    if (route === 'POST /api/customer/logout') {
+      await store.transaction((state) => {
+        const token = cookies(request).umami_customer;
+        if (token) delete state.sessions[digest(token)];
+      });
+      response.setHeader('Set-Cookie', `umami_customer=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secureCookies ? '; Secure' : ''}`);
+      return json(response, { authenticated: false });
+    }
     if (route === 'POST /api/owner/setup') {
-      loginRateLimit(request);
+      if (!allowOwnerSetup) fail(403, 'Owner setup is disabled on this hosted app. Set OWNER_PASSWORD in the hosting environment.');
+      await loginRateLimit(request);
       const password = passwordFrom(body);
       const result = await store.transaction(async (state) => {
         if (state.owner) fail(409, 'The owner is already set up. Sign in instead.');
         state.owner = await passwordRecord(password);
-        setSession(state, request, response, 'owner');
-        return { authenticated: true };
+        return { cookie: newSessionCookie(state, request, 'owner', undefined, secureCookies), payload: { authenticated: true } };
       });
-      return json(response, result, 201);
+      return signedIn(response, result, 201);
     }
     if (route === 'POST /api/owner/login') {
-      loginRateLimit(request);
+      await loginRateLimit(request);
       const password = passwordFrom(body);
-      return json(response, await store.transaction(async (state) => {
+      const result = await store.transaction(async (state) => {
         if (!state.owner) fail(409, 'Set up the owner account first.');
         if (!await passwordMatches(password, state.owner)) fail(401, 'That owner password is incorrect.');
-        setSession(state, request, response, 'owner');
-        return { authenticated: true };
-      }));
+        return { cookie: newSessionCookie(state, request, 'owner', undefined, secureCookies), payload: { authenticated: true } };
+      });
+      return signedIn(response, result);
     }
-    if (route === 'POST /api/owner/logout') return json(response, await store.transaction((state) => {
-      const token = cookies(request).umami_owner;
-      if (token) delete state.sessions[digest(token)];
-      response.setHeader('Set-Cookie', 'umami_owner=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0');
-      return { authenticated: false };
-    }));
+    if (route === 'POST /api/owner/logout') {
+      await store.transaction((state) => {
+        const token = cookies(request).umami_owner;
+        if (token) delete state.sessions[digest(token)];
+      });
+      response.setHeader('Set-Cookie', `umami_owner=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secureCookies ? '; Secure' : ''}`);
+      return json(response, { authenticated: false });
+    }
     if (route === 'POST /api/owner/stamps') return json(response, await store.transaction((state) => {
       session(state, request, 'owner');
       const code = normalizeCode(body.code);
-      if (!Array.isArray(body.categories) || body.categories.length === 0 || body.categories.length > CATEGORIES.length || body.categories.some((category) => !CATEGORIES.includes(category))) fail(400, 'Select at least one valid category.');
+      if (!Array.isArray(body.categories) || body.categories.length === 0 || body.categories.length > categoryIds.length || body.categories.some((category) => !categoryIds.includes(category))) fail(400, 'Select at least one valid category.');
       if (typeof body.directOrder !== 'boolean') fail(400, 'Specify whether this was a direct order.');
       if (typeof body.requestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.requestId)) fail(400, 'A valid request ID is required to save this visit.');
       const categories = [...new Set(body.categories)].sort();
@@ -233,9 +308,12 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
     if (route === 'POST /api/owner/redeem') return json(response, await store.transaction((state) => {
       session(state, request, 'owner');
       const customer = findCustomer(state, normalizeCode(body.code));
-      if (!CATEGORIES.every((category) => customer.stamps[category])) fail(409, 'This passport needs all six category stamps before redeeming.');
       if (customer.redeemed) fail(409, 'This customer has already redeemed the reward.');
+      const { discount } = getBingoStatus(customer.stamps);
+      if (!discount) fail(409, 'Complete a bingo line for 10% off or all eight paid squares for 25% off.');
       customer.redeemed = true;
+      customer.redeemedDiscount = discount;
+      customer.redeemedAt = new Date().toISOString();
       return { customer: publicCustomer(customer) };
     }));
     fail(404, 'This API endpoint was not found.');

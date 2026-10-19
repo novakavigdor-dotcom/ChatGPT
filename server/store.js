@@ -2,6 +2,18 @@ import { mkdir, readFile, rename, chmod, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
+export function emptyStore() {
+  return { version: 1, owner: null, customers: {}, sessions: {}, requests: {}, authAttempts: {} };
+}
+
+export function prepareStore(state) {
+  if (state?.version !== 1 || !state.customers || !state.sessions || !state.requests) {
+    throw new Error('The private passport store has an unsupported format.');
+  }
+  state.authAttempts ||= {};
+  return state;
+}
+
 // The private store deliberately lives outside the public checkout.
 export class Store {
   constructor(directory) {
@@ -15,14 +27,11 @@ export class Store {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     await chmod(this.directory, 0o700);
     try {
-      this.state = JSON.parse(await readFile(this.path, 'utf8'));
-      if (this.state.version !== 1 || !this.state.customers || !this.state.sessions || !this.state.requests) {
-        throw new Error('The private passport store has an unsupported format.');
-      }
+      this.state = prepareStore(JSON.parse(await readFile(this.path, 'utf8')));
       await chmod(this.path, 0o600);
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
-      this.state = { version: 1, owner: null, customers: {}, sessions: {}, requests: {} };
+      this.state = emptyStore();
       await this.persist(this.state);
     }
   }

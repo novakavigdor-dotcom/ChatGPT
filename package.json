@@ -5,11 +5,16 @@
   "type": "module",
   "description": "An interactive Umami Passport loyalty app prototype.",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12.0"
   },
   "scripts": {
     "start": "node server.js",
     "test": "node --test",
-    "build": "node build.js"
+    "build": "node build.js",
+    "build:web": "node scripts/build-web.js"
+  },
+  "dependencies": {
+    "@netlify/blobs": "11.1.4",
+    "serverless-http": "4.0.0"
   }
 }

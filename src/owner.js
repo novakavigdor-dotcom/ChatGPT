@@ -1,8 +1,9 @@
-import {CATEGORIES} from './loyalty.js';
+import {BOARD_CELLS,getBingoStatus} from './loyalty.js';
 import {startQrScanner} from './qr.js';
 
 const ownerEscape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const ownerIcon=(name,cls='')=>`<svg class="${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+const ownerCustomerName=value=>value.name||[value.firstName,value.lastName].filter(Boolean).join(' ')||'Umami guest';
 const ownerScanIcon=`<svg viewBox="0 0 48 48" aria-hidden="true"><path d="M16 6H8a2 2 0 0 0-2 2v8m26-10h8a2 2 0 0 1 2 2v8M6 32v8a2 2 0 0 0 2 2h8m16 0h8a2 2 0 0 0 2-2v-8M6 24h36"/><path d="M14 14h7v7h-7zm13 0h7v7h-7zM14 27h7v7h-7zm13 0h3v3h4v4h-7z"/></svg>`;
 
 function ownerReadCode(value){
@@ -20,7 +21,7 @@ function ownerReadCode(value){
 }
 
 export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
-  let disposed=false,authenticated=false,configured=true,customer=null,scanner=null,cameraController=null,cameraStarting=false,lookupBusy=false,authBusy=false,saveBusy=false,modalCustomer=null,lastError='',pendingVisit=null;
+  let disposed=false,authenticated=false,configured=true,ownerSetupAllowed=true,customer=null,scanner=null,cameraController=null,cameraStarting=false,lookupBusy=false,authBusy=false,saveBusy=false,modalCustomer=null,lastError='',pendingVisit=null;
   const pendingVisits=new Map();
   const select=selector=>container.querySelector(selector);
   const statusLabel=offline?'Offline demo · same browser only':'OWNER WORKSPACE';
@@ -50,11 +51,16 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
   function showLoading(){shell(`<div class="ow-loading" role="status"><span class="ow-loading-dot"></span>Opening your owner workspace…</div>`);}
   function showAuth(){
     authenticated=false;
+    if(!configured&&!ownerSetupAllowed){
+      shell(`<div class="ow-auth-layout"><div class="ow-auth-card"><span class="ow-auth-seal">${ownerIcon('lock')}</span><div class="ow-kicker">OWNER CONFIGURATION</div><h2>Owner setup needed</h2><p>Add <code>OWNER_PASSWORD</code> in Netlify Site configuration → Environment variables, then redeploy. Use at least 10 characters. Customers never need this password.</p><button class="ow-secondary" data-ow-action="exit">Back to customer passport ${ownerIcon('arrow')}</button></div><aside class="ow-auth-story"><div class="ow-big-seal">${ownerIcon('passport')}</div><h2>Your counter.<br>Your stamp of approval.</h2><p class="ow-setup-note">Once your site’s owner password is configured, come back here to scan passports and verify purchases.</p></aside></div>`);
+      return;
+    }
     shell(`<div class="ow-auth-layout"><div class="ow-auth-card"><span class="ow-auth-seal">${ownerIcon('lock')}</span><div class="ow-kicker">FOR THE PEOPLE BEHIND THE COUNTER</div><h2>${configured?'Welcome back.':'Make it yours.'}</h2><p>${configured?'Sign in to scan customer passports and approve their purchases.':'Set an owner password before sharing this app with customers. Only the owner can add stamps and confirm rewards.'}</p><form data-ow-form="auth"><label for="ow-password">${configured?'Owner password':'Create owner password'}</label><input id="ow-password" name="password" type="password" autocomplete="${configured?'current-password':'new-password'}" minlength="${configured?1:10}" maxlength="256" required placeholder="${configured?'Enter your password':'At least 10 characters'}"><p class="ow-form-error" data-ow-error role="alert" hidden></p><button type="submit" class="ow-primary">${configured?'Open owner workspace':'Set password & continue'}${ownerIcon('arrow')}</button></form><span class="ow-auth-note">${ownerIcon('lock')}${configured?'Your customers keep their own passport. This screen is just for you.':'Keep this password private. Customers never need it.'}</span></div><aside class="ow-auth-story"><div class="ow-big-seal">${ownerIcon('passport')}</div><h2>From their screen<br>to a new stamp.</h2><ol><li><b>01</b><span>A customer shows you their personal QR code.</span></li><li><b>02</b><span>You scan it and choose what they ordered.</span></li><li><b>03</b><span>Their passport updates with each new discovery.</span></li></ol></aside></div>`);
   }
   function summaryMarkup(value){
-    const count=CATEGORIES.filter(c=>value.stamps?.[c.id]).length;
-    return `<div class="ow-customer-summary"><div class="ow-customer-top"><div class="ow-customer-avatar">${ownerEscape((value.name||'G').charAt(0).toUpperCase())}</div><div><div class="ow-kicker">LAST PASSPORT</div><h3>${ownerEscape(value.name||'Umami guest')}</h3><span>${count} of 6 discoveries collected</span></div><span class="ow-verified">${ownerIcon('check')}Updated</span></div><div class="ow-mini-stamps">${CATEGORIES.map(c=>`<div class="${value.stamps?.[c.id]?'is-collected':''}" title="${ownerEscape(c.name)}: ${value.stamps?.[c.id]?'collected':'waiting'}">${ownerIcon(c.icon)}<span>${ownerEscape(c.name)}</span>${value.stamps?.[c.id]?'<b aria-label="Collected">✓</b>':''}</div>`).join('')}</div><div class="ow-summary-bottom"><span>${value.redeemed?'Reward redeemed':count===6?'All six collected · reward available':'A little closer to the secret roll.'}</span><button class="ow-quiet" data-ow-action="review">Review passport ${ownerIcon('arrow')}</button></div></div>`;
+    const bingo=getBingoStatus(value.stamps),name=ownerCustomerName(value);
+    const rewardLabel=value.redeemed?`${value.redeemedDiscount?`${value.redeemedDiscount}% reward`:'Card reward'} redeemed · one reward per card`:bingo.blackout?'Blackout! 25% discount available':bingo.hasBingo?'Bingo! 10% discount available':'Complete a line for 10% or the full card for 25%.';
+    return `<div class="ow-customer-summary"><div class="ow-customer-top"><div class="ow-customer-avatar">${ownerEscape(name.charAt(0).toUpperCase())}</div><div><div class="ow-kicker">LAST PASSPORT</div><h3>${ownerEscape(name)}</h3><span>${bingo.count} of 8 purchase stamps · free center included</span></div><span class="ow-verified">${ownerIcon('check')}Updated</span></div><div class="ow-mini-stamps ow-bingo-summary">${BOARD_CELLS.map(c=>`<div class="${c.free||value.stamps?.[c.id]?'is-collected':''} ${c.free?'ow-free-cell':''}" title="${ownerEscape(c.name)}: ${c.free?'free space':value.stamps?.[c.id]?'collected':'waiting'}">${ownerIcon(c.free?'spark':c.icon)}<span>${ownerEscape(c.free?'FREE':c.name)}</span>${c.free||value.stamps?.[c.id]?'<b aria-label="Collected">✓</b>':''}</div>`).join('')}</div><div class="ow-summary-bottom"><span>${ownerEscape(rewardLabel)}</span><button class="ow-quiet" data-ow-action="review">Review passport ${ownerIcon('arrow')}</button></div></div>`;
   }
   function showDashboard(){
     authenticated=true;
@@ -87,11 +93,17 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
     }finally{lookupBusy=false;if(button?.isConnected){button.disabled=false;button.innerHTML=`Look up passport ${ownerIcon('arrow')}`;}}
   }
   function modalMarkup(value){
-    const count=CATEGORIES.filter(c=>value.stamps?.[c.id]).length;
+    const bingo=getBingoStatus(value.stamps),name=ownerCustomerName(value);
     const remembered=pendingVisits.get(value.code);
     const locked=Boolean(remembered);
     pendingVisit=remembered||null;
-    return `<div class="ow-modal-header"><div class="ow-kicker">VERIFY THE PURCHASE</div><button class="ow-modal-close" data-ow-action="close-modal" aria-label="Close passport">${ownerIcon('close')}</button></div><h2 id="ow-modal-title">What did they get?</h2><div class="ow-modal-person"><span class="ow-customer-avatar">${ownerEscape((value.name||'G').charAt(0).toUpperCase())}</span><div><b>${ownerEscape(value.name||'Umami guest')}</b><span>${count} of 6 stamps collected · ${ownerEscape(value.code.slice(0,4))}…${ownerEscape(value.code.slice(-4))}</span></div></div><p class="ow-modal-intro">Select every category in this purchase.<br>We’ll mark each new discovery on their passport.</p><form data-ow-form="stamps"><fieldset class="ow-category-grid" ${locked?'disabled':''}><legend class="ow-sr-only">Categories purchased</legend>${CATEGORIES.map(c=>{const collected=Boolean(value.stamps?.[c.id]),checked=remembered?.categories.includes(c.id);return `<label class="ow-category-option ${collected?'is-collected':''}"><input type="checkbox" name="categories" value="${c.id}" ${collected?'disabled':''} ${checked?'checked':''}><span class="ow-option-icon">${ownerIcon(c.icon)}</span><span class="ow-option-copy"><b>${ownerEscape(c.name)}</b><small>${collected?'Already collected':ownerEscape(c.description)}</small></span><span class="ow-option-tick" aria-hidden="true">${collected?'✓':''}</span></label>`;}).join('')}</fieldset><label class="ow-direct-option"><input type="checkbox" name="directOrder" ${remembered?.directOrder?'checked':''} ${locked?'disabled':''}>${ownerIcon('bag')}<span><b>They ordered directly with Umami</b><small>Add a direct-order badge for this visit.</small></span></label><p class="ow-modal-error" data-ow-save-error role="alert" ${locked?'':'hidden'}>${locked?'This visit has an unconfirmed save. Retry to check the same purchase without adding it twice.':''}</p><button class="ow-primary ow-full" type="submit" data-ow-confirm ${!locked?'disabled':''}>${locked?'Retry confirmation':'Okay, add stamps'} ${ownerIcon('check')}</button><p class="ow-save-note">${count===6?'Every category is already collected. You can confirm their reward below.':'Only select categories from a purchase you have checked.'}</p></form>${count===6?`<div class="ow-redeem-box">${ownerIcon('gift')}<div><b>${value.redeemed?'Reward already redeemed':'Secret Passport Roll unlocked'}</b><p>${value.redeemed?'This passport’s reward has already been confirmed.':'Hand over the reward, then mark it redeemed.'}</p></div>${!value.redeemed?'<button class="ow-secondary" data-ow-action="redeem">Confirm redemption</button>':''}</div>`:''}`;
+    return `<div class="ow-modal-header"><div class="ow-kicker">VERIFY THE PURCHASE</div><button class="ow-modal-close" data-ow-action="close-modal" aria-label="Close passport">${ownerIcon('close')}</button></div><h2 id="ow-modal-title">What did they get?</h2><div class="ow-modal-person"><span class="ow-customer-avatar">${ownerEscape(name.charAt(0).toUpperCase())}</span><div><b>${ownerEscape(name)}</b><span>${bingo.count} of 8 purchase stamps · ${ownerEscape(value.code.slice(0,4))}…${ownerEscape(value.code.slice(-4))}</span></div></div><p class="ow-modal-intro">Select every category in this purchase.<br>The free center is already covered. It never needs scanning.</p><form data-ow-form="stamps"><fieldset class="ow-category-grid ow-bingo-options" ${locked?'disabled':''}><legend class="ow-sr-only">Categories purchased</legend>${BOARD_CELLS.map(c=>{if(c.free)return `<div class="ow-category-option ow-free-cell is-collected" aria-label="Free center, automatically covered"><span class="ow-option-icon">${ownerIcon('spark')}</span><span class="ow-option-copy"><b>FREE</b><small>Always covered</small></span><span class="ow-option-tick" aria-hidden="true">✓</span></div>`;const collected=Boolean(value.stamps?.[c.id]),checked=remembered?.categories.includes(c.id);return `<label class="ow-category-option ${collected?'is-collected':''}"><input type="checkbox" name="categories" value="${c.id}" ${collected?'disabled':''} ${checked?'checked':''}><span class="ow-option-icon">${ownerIcon(c.icon)}</span><span class="ow-option-copy"><b>${ownerEscape(c.name)}</b><small>${collected?'Already collected':ownerEscape(c.description)}</small></span><span class="ow-option-tick" aria-hidden="true">${collected?'✓':''}</span></label>`;}).join('')}</fieldset><label class="ow-direct-option"><input type="checkbox" name="directOrder" ${remembered?.directOrder?'checked':''} ${locked?'disabled':''}>${ownerIcon('bag')}<span><b>They ordered directly with Umami</b><small>Add a direct-order badge for this visit.</small></span></label><p class="ow-modal-error" data-ow-save-error role="alert" ${locked?'':'hidden'}>${locked?'This visit has an unconfirmed save. Retry to check the same purchase without adding it twice.':''}</p><button class="ow-primary ow-full" type="submit" data-ow-confirm ${!locked?'disabled':''}>${locked?'Retry confirmation':'Okay, add stamps'} ${ownerIcon('check')}</button><p class="ow-save-note">${bingo.blackout?'All 8 purchase categories are collected. The free center completes their blackout.':'Only select categories from a purchase you have checked.'}</p></form>${rewardMarkup(value,bingo)}`;
+  }
+  function rewardMarkup(value,bingo){
+    if(!bingo.hasBingo&&!value.redeemed)return '<p class="ow-bingo-terms">Any horizontal, vertical or diagonal line earns 10%. A full card earns 25%. One reward per card; discounts cannot be combined.</p>';
+    const redeemed=value.redeemed,discount=bingo.discount;
+    const title=redeemed?`${value.redeemedDiscount?`${value.redeemedDiscount}% reward`:'Card reward'} already redeemed`:bingo.blackout?'Blackout! 25% discount unlocked':'Bingo! 10% discount unlocked';
+    return `<section class="ow-redeem-box">${ownerIcon('gift')}<div><b>${ownerEscape(title)}</b><p>${redeemed?'This card’s one reward has been used. Further stamps do not unlock another discount.':bingo.blackout?'All 8 purchase stamps collected, plus the free center.':'A complete horizontal, vertical or diagonal line.'}</p></div>${!redeemed?`<button class="ow-secondary" data-ow-action="redeem" ${pendingVisit?'disabled':''}>Use ${discount}% reward</button><div class="ow-redemption-confirm" data-ow-redeem-confirm hidden><h3>Use their one reward now?</h3><p>${discount===10?'Redeeming 10% uses this card’s only reward. They can keep collecting instead to reach a full card worth 25%.':'Confirm the 25% discount on this purchase. This uses the card’s only reward.'} This discount cannot be combined with another offer.</p><div><button class="ow-quiet" data-ow-action="cancel-redeem">${discount===10?'Keep collecting':'Cancel'}</button><button class="ow-primary" data-ow-action="confirm-redeem">Confirm ${discount}% discount ${ownerIcon('check')}</button></div></div>`:''}</section>`;
   }
   function openCustomer(value){
     stopCamera();modalCustomer=value;
@@ -132,15 +144,30 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
       button.disabled=false;button.innerHTML=`Retry confirmation ${ownerIcon('check')}`;
     }finally{saveBusy=false;}
   }
+  function showRedemption(){
+    if(saveBusy||pendingVisit||!modalCustomer||modalCustomer.redeemed||!getBingoStatus(modalCustomer.stamps).hasBingo)return;
+    if(select('[data-ow-form="stamps"] input[name="categories"]:checked')){
+      const error=select('[data-ow-save-error]');error.textContent='Confirm the selected purchase stamps first, then review this passport to use its reward.';error.hidden=false;
+      return;
+    }
+    const prompt=select('[data-ow-redeem-confirm]');if(!prompt)return;
+    prompt.hidden=false;select('[data-ow-action="redeem"]').hidden=true;
+    prompt.querySelector('[data-ow-action="cancel-redeem"]')?.focus();
+  }
+  function cancelRedemption(){
+    if(saveBusy)return;
+    const prompt=select('[data-ow-redeem-confirm]');if(prompt)prompt.hidden=true;
+    const button=select('[data-ow-action="redeem"]');if(button){button.hidden=false;button.focus();}
+  }
   async function redeem(){
-    if(saveBusy||!modalCustomer||modalCustomer.redeemed)return;
+    if(saveBusy||pendingVisit||!modalCustomer||modalCustomer.redeemed||!getBingoStatus(modalCustomer.stamps).hasBingo)return;
     const current=modalCustomer;saveBusy=true;
-    const button=select('[data-ow-action="redeem"]');button.disabled=true;button.textContent='Confirming…';
+    const button=select('[data-ow-action="confirm-redeem"]'),discount=getBingoStatus(current.stamps).discount;button.disabled=true;button.textContent='Confirming…';
     try{
       const result=await api('/api/owner/redeem',{method:'POST',body:{code:current.code}});
       if(disposed)return;
-      customer=result.customer;openCustomer(customer);toast('Reward marked as redeemed.');
-    }catch(error){if(!disposed){const el=select('[data-ow-save-error]');el.textContent=errorText(error);el.hidden=false;button.disabled=false;button.textContent='Confirm redemption';}}
+      customer=result.customer;openCustomer(customer);toast(`${customer.redeemedDiscount||discount}% discount marked as redeemed.`);
+    }catch(error){if(!disposed){const el=select('[data-ow-save-error]');el.textContent=errorText(error);el.hidden=false;button.disabled=false;button.textContent=`Confirm ${discount}% discount`;}}
     finally{saveBusy=false;}
   }
   async function startCamera(){
@@ -180,7 +207,9 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
       case'stop-camera':stopCamera();break;
       case'close-modal':closeCustomer();break;
       case'review':if(customer)lookup(customer.code);break;
-      case'redeem':redeem();break;
+      case'redeem':showRedemption();break;
+      case'cancel-redeem':cancelRedemption();break;
+      case'confirm-redeem':redeem();break;
     }
   }
   function onSubmit(event){
@@ -200,6 +229,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
       const status=await api('/api/status');
       if(disposed)return;
       configured=Boolean(status.ownerConfigured);
+      ownerSetupAllowed=status.ownerSetupAllowed!==false;
       if(configured){
         try{await api('/api/owner/session');if(disposed)return;authenticated=true;}
         catch{authenticated=false;}

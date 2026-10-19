@@ -58,7 +58,7 @@ for (const name of moduleNames) {
   imports[`umami/${name}`] = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
 }
 
-let html = embedAssets(await readFile(resolve(root, 'index.html'), 'utf8'));
+let html = embedAssets(await readFile(resolve(root, 'index.html'), 'utf8')).replace('<head>', '<head><meta name="umami-mode" content="offline">');
 let inlinedStyle = false;
 let inlinedOwnerStyle = false;
 for (const name of ['style', 'owner']) {
@@ -98,10 +98,12 @@ import pathlib, sys, zipfile
 root = pathlib.Path(sys.argv[1]).resolve()
 standalone = pathlib.Path(sys.argv[2])
 archive = pathlib.Path(sys.argv[3])
-individual = ['README.md', 'package.json', 'server.js', 'build.js', 'index.html', 'style.css', 'owner.css']
+individual = ['README.md', 'package.json', 'package-lock.json', 'netlify.toml', 'server.js', 'build.js', 'index.html', 'style.css', 'owner.css']
 directories = {
     'src': {'.js'},
     'server': {'.js'},
+    'scripts': {'.js'},
+    'netlify': {'.js'},
     'assets': {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.ico', '.ttf', '.woff', '.woff2', '.txt', '.md'},
     'test': {'.js'},
 }

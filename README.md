@@ -1,53 +1,56 @@
 # Umami Passport
 
-A restaurant passport with customer QR codes and an owner dashboard. Customers explore six food categories: maki, poke or onigiri, noodles or soup, prepared fish, platters, and chef’s choice. A completed passport unlocks access to the Secret Passport Roll; direct ordering earns a separate badge.
+A customer loyalty app with personal QR codes, an owner scanner, and a 3×3 food bingo card. A completed line earns 10% off; all eight food squares earn 25% off. The centre square is free.
 
-## Start on Windows
+## Deploy the working app on Netlify
 
-Install Node.js 20 or newer. On GitHub, choose **Code → Download ZIP**, extract it, and open the folder containing `package.json`. If you downloaded the separate `umami-passport.zip` app bundle instead, use its `source` folder. Open a terminal in that folder and paste:
+Use a **GitHub-connected Netlify deployment**. Uploading the HTML or a static folder alone does not deploy the API needed for signup and shared passports.
+
+1. Connect this repository to the Netlify site and deploy the `main` branch. The included `netlify.toml` sets the build command to `npm run build:web`, the publish directory to `dist`, and the Functions directory to `netlify/functions`.
+2. In the site's **Project configuration → Environment variables**, add a private `OWNER_PASSWORD` of 10–256 characters, available to Functions. Redeploy after adding it. Do not put the password in a source file or chat.
+3. Open `/api/health` on the deployed site; it should return `{"ready":true}`. Open `/owner` and sign in with your owner password. Give customers the same site's `/customer` address.
+
+Netlify automatically provides the credentials for Netlify Blobs; no database key or extra service signup is needed. The function uses a site-wide Blobs store so passports survive deployments and cold starts. Strong reads and conditional writes preserve simultaneous staff updates. Public first-owner setup is disabled on Netlify; `OWNER_PASSWORD` initializes the first owner. It does not overwrite an existing owner password.
+
+The `dist` directory contains only public HTML, styles, browser JavaScript, images and fonts. Server code is deployed separately as a Function. Private state, passwords, environment files, and server source are never published as static files.
+
+## Customer and owner workflow
+
+1. Customers open `/customer`, enter first name, last name, and email, then save their private recovery code. Email is recorded for the account; the app does not send email or verify the address.
+2. At the counter, the customer shows their QR code or public customer code.
+3. The owner signs in at `/owner`, scans the QR code or enters the customer code, selects the qualifying food squares, and confirms the visit.
+4. The customer's card updates automatically within a few seconds. The owner can record the eligible discount redemption.
+
+The public QR code identifies a passport to staff. It does not sign the customer in. Customers use their email and **private recovery code** to reopen the same passport on another browser. Keep that recovery code private and save it when shown; the app does not email it.
+
+Phone camera scanning requires HTTPS and camera permission. Manual customer-code entry works when scanning is unavailable. Owner and customer devices must use the same deployed site.
+
+## Start locally on Windows
+
+Install Node.js **22.12 or newer**. On GitHub choose **Code → Download ZIP**, extract it, and open the folder containing `package.json`. For the separate `umami-passport.zip` bundle, open its `source` folder. Open a terminal there and paste:
 
 ```powershell
-$env:UMAMI_DATA_DIR = "$env:LOCALAPPDATA\UmamiPassport"
+npm ci
 npm start
 ```
-
-No dependency installation is required. The server uses Node.js standard modules and the browser QR tools are bundled locally.
-
-Open these addresses:
 
 - Owner: **http://localhost:3000/owner**
 - Customer: **http://localhost:3000/customer**
 
-On the first owner visit, create an owner password with at least 10 characters. If the host already provides `OWNER_PASSWORD`, sign in with that password instead. Complete owner setup before sharing a public app address.
+Local Node startup allows first-run owner setup with a password of 10–256 characters. You can instead initialize it through `OWNER_PASSWORD`. Local data is stored outside the public checkout: `/workspace/umami-data` on Linux or `UmamiPassport` in Windows Local AppData. Set `UMAMI_DATA_DIR` to change that path. Keep it on persistent disk and back it up. Local JSON storage supports one server process; Netlify hosting uses Blobs instead.
 
-## Use it at the restaurant
+`localhost` refers to the current device. Use the deployed HTTPS address to connect a phone to the app. For another Node host, provide persistent disk and an HTTPS proxy that preserves Host, set `UMAMI_HTTPS=1`, and set `PORT` if required.
 
-1. Host the Node server at a shared HTTPS address, then finish owner setup at `/owner`.
-2. Give customers the same app address ending in `/customer`. Each customer opens their own passport and shows its QR code or customer code.
-3. The owner signs in at `/owner`, scans that QR code or enters the customer code, and adds the qualifying stamps after checking the purchase.
-4. Stamps appear automatically within a few seconds while the customer’s passport is open. The customer and owner must use the same running server.
-
-Phone camera scanning requires HTTPS and permission to use the camera. `localhost` works for testing on the computer running the app. On a phone, `localhost` refers to the phone itself; use the shared hosted address. Manual code entry is available if camera access is unavailable.
-
-## Data and hosting
-
-The server saves customers, stamps, and owner authentication in a private data directory outside the public checkout: `/workspace/umami-data` on Linux, or `UmamiPassport` inside Windows Local AppData by default. Set `UMAMI_DATA_DIR` to a private writable directory if your host uses another location. Keep that directory on persistent storage and back it up. Source ZIP downloads do not include customer records or owner credentials.
-
-A customer’s public QR code identifies the passport to the owner; it does not log a customer in or restore their passport in another browser. Each customer must keep using the same browser and retain its cookies. Clearing browser data creates a new passport; cross-device customer recovery is not implemented.
-
-The server listens on port 3000 by default; set `PORT` if your host requires another port. Run one server process with persistent disk; the JSON store does not support multiple replicas or stateless serverless hosting. Place it behind an HTTPS proxy that preserves the original Host header, and set `UMAMI_HTTPS=1` to use Secure cookies. Provide `OWNER_PASSWORD` through the host’s private environment settings to initialize the first owner without an open setup page. This variable only initializes a new store; it does not overwrite an existing owner password.
-
-## Offline demonstration
-
-Download **Umami-Passport.html** and double-click it in a current Chrome or Edge browser. No installation is required. This standalone file embeds the app, QR tools, styles, images, fonts, and licenses. It provides a same-browser demonstration; it cannot sync devices or provide a shared owner system. Browser privacy settings may prevent saving local-file progress.
-
-## Development
+## Development and downloads
 
 ```sh
 npm test
+npm run build:web
 npm run build
 ```
 
-The build writes `Umami-Passport.html` into the parent directory of this checkout. With Python 3 available, it also writes `umami-passport.zip` containing the standalone demo and source code. The build keeps ES modules isolated through an import map and embeds public assets before packaging. The ZIP explicitly excludes private runtime data and environment files.
+`build:web` creates only the public `dist` directory for Netlify. `build` creates `Umami-Passport.html` in the parent folder and, with Python 3 available, `umami-passport.zip` containing the app and source, including deployment configuration. Downloads exclude customer data and credentials.
 
-Menu prices and orders remain a prototype: no payment is collected and no food order is sent to the restaurant. Owner approval records loyalty progress, without a POS or purchase-verification integration. Confirm category eligibility and publish reward terms before using the programme with customers.
+The standalone HTML opens in a current Chrome or Edge browser without installation. It embeds browser code, QR tools, images, fonts, and licenses. It is an offline demonstration confined to the same browser; it cannot sync devices. Use the hosted app for customer accounts and the shared owner system.
+
+The app does not collect payments or send food orders. Staff confirm qualifying purchases manually. Confirm eligibility and publish the restaurant's promotion terms before using the discounts with customers.

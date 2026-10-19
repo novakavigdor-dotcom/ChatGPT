@@ -1,0 +1,47 @@
+[build]
+  command = "npm run build:web"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+[functions]
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/owner"
+  to = "/index.html"
+  status = 200
+
+[[redirects]]
+  from = "/owner/"
+  to = "/index.html"
+  status = 200
+
+[[redirects]]
+  from = "/customer"
+  to = "/index.html"
+  status = 200
+
+[[redirects]]
+  from = "/customer/"
+  to = "/index.html"
+  status = 200
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+[[headers]]
+  for = "/api/*"
+  [headers.values]
+    Cache-Control = "no-store"
