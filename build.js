@@ -91,8 +91,9 @@ if (bundledLicenses.length) {
 await writeFile(outputFile, html);
 console.log(`Standalone demo: ${outputFile}`);
 
-// Only source code and public assets belong in the download. The private data
-// directory, .env files, Git metadata and server runtime files are never included.
+// The source download includes the private server verifier needed to deploy the
+// backend; it is never part of the standalone HTML or public site build.
+// Customer data, sessions, .env files and Git metadata are never included.
 const zipScript = `
 import pathlib, sys, zipfile
 root = pathlib.Path(sys.argv[1]).resolve()

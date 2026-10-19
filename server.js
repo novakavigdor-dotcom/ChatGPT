@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { randomBytes, randomUUID, createHash, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { Store } from './server/store.js';
+import { OWNER_ACCESS_RECORD } from './server/owner-access.js';
 import { CATEGORIES, getBingoStatus } from './src/loyalty.js';
 
 const deriveKey = promisify(scrypt);
@@ -156,15 +157,20 @@ function publicPath(pathname) {
   return null;
 }
 
-export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaultDataDir, store: injectedStore, ownerPassword = process.env.OWNER_PASSWORD, clientAddress = (request) => request.socket.remoteAddress || 'unknown', secureCookies = process.env.UMAMI_HTTPS === '1', allowOwnerSetup = true } = {}) {
+export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaultDataDir, store: injectedStore, ownerPassword = process.env.OWNER_PASSWORD, ownerAccessRecord = OWNER_ACCESS_RECORD, clientAddress = (request) => request.socket.remoteAddress || 'unknown', secureCookies = process.env.UMAMI_HTTPS === '1', allowOwnerSetup = true } = {}) {
+  if (ownerAccessRecord !== null && (!ownerAccessRecord || typeof ownerAccessRecord.salt !== 'string' || !/^[a-f0-9]{128}$/i.test(ownerAccessRecord.hash || ''))) {
+    throw new Error('The private owner access record is invalid.');
+  }
   const store = injectedStore || new Store(dataDir);
   await store.ready;
   if (await store.read((state) => Object.values(state.customers).some((customer) => customer.version < 2))) {
     await store.transaction((state) => { for (const customer of Object.values(state.customers)) migrateCustomer(customer); });
   }
   if (ownerPassword) {
-    if (ownerPassword.length < 10 || ownerPassword.length > 256) throw new Error('OWNER_PASSWORD must contain 10 to 256 characters.');
-    if (!await store.read((state) => Boolean(state.owner))) {
+    const validLegacyPassword = typeof ownerPassword === 'string' && ownerPassword.length >= 10 && ownerPassword.length <= 256;
+    if (!validLegacyPassword && !ownerAccessRecord) throw new Error('OWNER_PASSWORD must contain 10 to 256 characters.');
+    // An obsolete password setting must not disable the configured access code.
+    if (validLegacyPassword && !await store.read((state) => Boolean(state.owner))) {
       await store.transaction(async (state) => { if (!state.owner) state.owner = await passwordRecord(ownerPassword); });
     }
   }
@@ -188,7 +194,7 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
 
   async function api(request, response, url) {
     const route = `${request.method} ${url.pathname}`;
-    if (route === 'GET /api/status') return json(response, await store.read((state) => ({ ownerConfigured: Boolean(state.owner), ownerSetupAllowed: allowOwnerSetup })));
+    if (route === 'GET /api/status') return json(response, await store.read((state) => ({ ownerConfigured: Boolean(state.owner || ownerAccessRecord), ownerSetupAllowed: allowOwnerSetup && !ownerAccessRecord })));
     if (route === 'GET /api/health') return json(response, { ready: true });
     if (route === 'GET /api/customer') return json(response, await store.read((state) => {
       const auth = session(state, request, 'customer');
@@ -254,7 +260,7 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       return json(response, { authenticated: false });
     }
     if (route === 'POST /api/owner/setup') {
-      if (!allowOwnerSetup) fail(403, 'Owner setup is disabled on this hosted app. Set OWNER_PASSWORD in the hosting environment.');
+      if (!allowOwnerSetup || ownerAccessRecord) fail(403, 'Owner setup is disabled. Sign in using the private owner access code.');
       await loginRateLimit(request);
       const password = passwordFrom(body);
       const result = await store.transaction(async (state) => {
@@ -266,10 +272,16 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
     }
     if (route === 'POST /api/owner/login') {
       await loginRateLimit(request);
-      const password = passwordFrom(body);
+      const usingCode = body.code !== undefined;
+      const code = typeof body.code === 'string' ? body.code.trim() : '';
+      const password = usingCode ? null : passwordFrom(body);
       const result = await store.transaction(async (state) => {
-        if (!state.owner) fail(409, 'Set up the owner account first.');
-        if (!await passwordMatches(password, state.owner)) fail(401, 'That owner password is incorrect.');
+        if (usingCode) {
+          if (!ownerAccessRecord || !/^[0-9]{1,64}$/.test(code) || !await passwordMatches(code, ownerAccessRecord)) fail(401, 'That owner access code is incorrect.');
+        } else {
+          if (!state.owner) fail(401, 'Sign in using the private owner access code.');
+          if (!await passwordMatches(password, state.owner)) fail(401, 'That owner password is incorrect.');
+        }
         return { cookie: newSessionCookie(state, request, 'owner', undefined, secureCookies), payload: { authenticated: true } };
       });
       return signedIn(response, result);

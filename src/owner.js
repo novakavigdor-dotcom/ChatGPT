@@ -21,7 +21,7 @@ function ownerReadCode(value){
 }
 
 export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
-  let disposed=false,authenticated=false,configured=true,ownerSetupAllowed=true,customer=null,scanner=null,cameraController=null,cameraStarting=false,lookupBusy=false,authBusy=false,saveBusy=false,modalCustomer=null,lastError='',pendingVisit=null;
+  let disposed=false,authenticated=false,bootBusy=false,customer=null,scanner=null,cameraController=null,cameraStarting=false,lookupBusy=false,authBusy=false,saveBusy=false,modalCustomer=null,pendingVisit=null;
   const pendingVisits=new Map();
   const select=selector=>container.querySelector(selector);
   const statusLabel=offline?'Offline demo · same browser only':'OWNER WORKSPACE';
@@ -37,6 +37,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
       const panel=select('[data-ow-camera]');if(panel)panel.classList.remove('is-scanning');
       const button=select('[data-ow-action="camera"]');if(button){button.disabled=false;button.innerHTML=`${ownerScanIcon}Start scanner`;}
       const stop=select('[data-ow-action="stop-camera"]');if(stop)stop.hidden=true;
+      const hint=select('[data-ow-camera-hint]');if(hint)hint.textContent='Camera is off. Tap Start scanner when you’re ready.';
     }
   }
 
@@ -44,18 +45,18 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
   function shell(contents){
     stopCamera();
     container.innerHTML=`<section class="ow-workspace">${header()}${contents}</section><dialog id="owner-modal" class="ow-dialog" aria-labelledby="ow-modal-title"><div data-ow-modal-content></div></dialog>`;
-    select('#owner-modal').addEventListener('cancel',onDialogCancel);
-    select('#owner-modal').addEventListener('close',()=>{stopCamera();if(!saveBusy)modalCustomer=null;});
+    const dialog=select('#owner-modal');
+    dialog.addEventListener('cancel',onDialogCancel);
+    dialog.addEventListener('close',()=>{
+      if(disposed||dialog!==select('#owner-modal'))return;
+      stopCamera();if(!saveBusy)modalCustomer=null;
+    });
   }
   function showError(message){const el=select('[data-ow-error]');if(el){el.textContent=message;el.hidden=!message;}}
   function showLoading(){shell(`<div class="ow-loading" role="status"><span class="ow-loading-dot"></span>Opening your owner workspace…</div>`);}
   function showAuth(){
     authenticated=false;
-    if(!configured&&!ownerSetupAllowed){
-      shell(`<div class="ow-auth-layout"><div class="ow-auth-card"><span class="ow-auth-seal">${ownerIcon('lock')}</span><div class="ow-kicker">OWNER CONFIGURATION</div><h2>Owner setup needed</h2><p>Add <code>OWNER_PASSWORD</code> in Netlify Site configuration → Environment variables, then redeploy. Use at least 10 characters. Customers never need this password.</p><button class="ow-secondary" data-ow-action="exit">Back to customer passport ${ownerIcon('arrow')}</button></div><aside class="ow-auth-story"><div class="ow-big-seal">${ownerIcon('passport')}</div><h2>Your counter.<br>Your stamp of approval.</h2><p class="ow-setup-note">Once your site’s owner password is configured, come back here to scan passports and verify purchases.</p></aside></div>`);
-      return;
-    }
-    shell(`<div class="ow-auth-layout"><div class="ow-auth-card"><span class="ow-auth-seal">${ownerIcon('lock')}</span><div class="ow-kicker">FOR THE PEOPLE BEHIND THE COUNTER</div><h2>${configured?'Welcome back.':'Make it yours.'}</h2><p>${configured?'Sign in to scan customer passports and approve their purchases.':'Set an owner password before sharing this app with customers. Only the owner can add stamps and confirm rewards.'}</p><form data-ow-form="auth"><label for="ow-password">${configured?'Owner password':'Create owner password'}</label><input id="ow-password" name="password" type="password" autocomplete="${configured?'current-password':'new-password'}" minlength="${configured?1:10}" maxlength="256" required placeholder="${configured?'Enter your password':'At least 10 characters'}"><p class="ow-form-error" data-ow-error role="alert" hidden></p><button type="submit" class="ow-primary">${configured?'Open owner workspace':'Set password & continue'}${ownerIcon('arrow')}</button></form><span class="ow-auth-note">${ownerIcon('lock')}${configured?'Your customers keep their own passport. This screen is just for you.':'Keep this password private. Customers never need it.'}</span></div><aside class="ow-auth-story"><div class="ow-big-seal">${ownerIcon('passport')}</div><h2>From their screen<br>to a new stamp.</h2><ol><li><b>01</b><span>A customer shows you their personal QR code.</span></li><li><b>02</b><span>You scan it and choose what they ordered.</span></li><li><b>03</b><span>Their passport updates with each new discovery.</span></li></ol></aside></div>`);
+    shell(`<div class="ow-auth-layout"><div class="ow-auth-card"><span class="ow-auth-seal">${ownerIcon('lock')}</span><div class="ow-kicker">FOR THE PEOPLE BEHIND THE COUNTER</div><h2>Owner sign-in.</h2><p>Enter your owner access code. Your camera will open so you can scan a customer’s QR code and stamp their purchases.</p><form data-ow-form="auth"><label for="ow-access-code">Owner access code</label><input id="ow-access-code" name="code" type="password" inputmode="numeric" autocomplete="current-password" maxlength="256" required placeholder="Enter your access code"><p class="ow-form-error" data-ow-error role="alert" hidden></p><button type="submit" class="ow-primary">Sign in & open scanner ${ownerIcon('arrow')}</button></form><span class="ow-auth-note">${ownerIcon('lock')}Keep this code private. Customers never need it.</span></div><aside class="ow-auth-story"><div class="ow-big-seal">${ownerIcon('passport')}</div><h2>From their screen<br>to a new stamp.</h2><ol><li><b>01</b><span>Sign in and allow camera access when your browser asks.</span></li><li><b>02</b><span>Scan the customer’s QR code and choose what they ordered.</span></li><li><b>03</b><span>Confirm their stamps. Your scanner opens for the next customer.</span></li></ol></aside></div>`);
   }
   function summaryMarkup(value){
     const bingo=getBingoStatus(value.stamps),name=ownerCustomerName(value);
@@ -64,16 +65,22 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
   }
   function showDashboard(){
     authenticated=true;
-    shell(`${offline?'<div class="ow-demo-note">Offline demo: scan and stamp the customer passport saved in this browser. To use separate phones, run the hosted app and share its secure website address.</div>':''}<div class="ow-dashboard"><section class="ow-scan-card"><div class="ow-card-heading"><div><div class="ow-kicker">ONE CUSTOMER. THEIR OWN PASSPORT.</div><h2>Ready when they are.</h2></div><span class="ow-step-tag">01 → 02 → 03</span></div><div class="ow-camera" data-ow-camera><video data-ow-video playsinline muted aria-label="Live camera QR scanner"></video><div class="ow-camera-idle"><div class="ow-scan-art">${ownerScanIcon}</div><h3>Point. Scan. Stamp.</h3><p>Ask the customer to open their passport<br>and show you their QR code.</p></div><div class="ow-viewfinder" aria-hidden="true"><i></i><i></i><i></i><i></i></div><div class="ow-scanning-label">Looking for an Umami Passport…</div></div><div class="ow-camera-actions"><button class="ow-primary" data-ow-action="camera">${ownerScanIcon}Start scanner</button><button class="ow-quiet" data-ow-action="stop-camera" hidden>Stop camera</button><span data-ow-camera-hint>${ownerIcon('lock')}Camera starts only when you tap.</span></div><p class="ow-form-error" data-ow-camera-error role="alert" hidden></p><div class="ow-manual-divider"><span>or enter their code</span></div><form data-ow-form="lookup" class="ow-lookup-form"><label for="ow-code">CUSTOMER PASSPORT CODE</label><div><input id="ow-code" name="code" type="text" spellcheck="false" autocomplete="off" autocapitalize="characters" required placeholder="Paste their code or QR link" aria-describedby="ow-code-help"><button class="ow-secondary" type="submit">Look up passport ${ownerIcon('arrow')}</button></div><small id="ow-code-help">Find the code below the QR on the customer’s screen.</small><p class="ow-form-error" data-ow-error role="alert" hidden></p></form></section><aside class="ow-how-card"><div class="ow-kicker">GOOD TASTE. A SIMPLE ROUTINE.</div><h2>Three little steps.</h2><ol><li><span>1</span><div><h3>Find their passport.</h3><p>Scan the customer’s personal QR code, or enter their passport code.</p></div></li><li><span>2</span><div><h3>Pick their discoveries.</h3><p>Choose every category they purchased. More than one? Tick them all.</p></div></li><li><span>3</span><div><h3>A little “okay”.</h3><p>Confirm the purchase. New stamps appear on their passport automatically.</p></div></li></ol><div class="ow-how-note">${ownerIcon('check')}Already collected stamps stay marked. Each category counts once.</div></aside></div><section data-ow-last>${customer?summaryMarkup(customer):'<div class="ow-empty-recent">'+ownerIcon('passport')+'<span>Your first scan is waiting. Their next favourite is, too.</span></div>'}</section>`);
+    shell(`${offline?'<div class="ow-demo-note">Offline demo: scan and stamp the customer passport saved in this browser. To use separate phones, run the hosted app and share its secure website address.</div>':''}<div class="ow-dashboard"><section class="ow-scan-card"><div class="ow-card-heading"><div><div class="ow-kicker">ONE CUSTOMER. THEIR OWN PASSPORT.</div><h2>Ready when they are.</h2></div><span class="ow-step-tag">01 → 02 → 03</span></div><div class="ow-camera" data-ow-camera><video data-ow-video playsinline muted aria-label="Live camera QR scanner"></video><div class="ow-camera-idle"><div class="ow-scan-art">${ownerScanIcon}</div><h3>Point. Scan. Stamp.</h3><p>Ask the customer to open their passport<br>and show you their QR code.</p></div><div class="ow-viewfinder" aria-hidden="true"><i></i><i></i><i></i><i></i></div><div class="ow-scanning-label">Looking for an Umami Passport…</div></div><div class="ow-camera-actions"><button class="ow-primary" data-ow-action="camera">${ownerScanIcon}Start scanner</button><button class="ow-quiet" data-ow-action="stop-camera" hidden>Stop camera</button><span data-ow-camera-hint>Allow camera access when your browser asks.</span></div><p class="ow-form-error" data-ow-camera-error role="alert" hidden></p><div class="ow-manual-divider"><span>or enter their code</span></div><form data-ow-form="lookup" class="ow-lookup-form"><label for="ow-code">CUSTOMER PASSPORT CODE</label><div><input id="ow-code" name="code" type="text" spellcheck="false" autocomplete="off" autocapitalize="characters" required placeholder="Paste their code or QR link" aria-describedby="ow-code-help"><button class="ow-secondary" type="submit">Look up passport ${ownerIcon('arrow')}</button></div><small id="ow-code-help">Find the code below the QR on the customer’s screen.</small><p class="ow-form-error" data-ow-error role="alert" hidden></p></form></section><aside class="ow-how-card"><div class="ow-kicker">GOOD TASTE. A SIMPLE ROUTINE.</div><h2>Three little steps.</h2><ol><li><span>1</span><div><h3>Find their passport.</h3><p>Scan the customer’s personal QR code, or enter their passport code.</p></div></li><li><span>2</span><div><h3>Pick their discoveries.</h3><p>Choose every category they purchased. More than one? Tick them all.</p></div></li><li><span>3</span><div><h3>A little “okay”.</h3><p>Confirm the purchase. New stamps appear on their passport automatically.</p></div></li></ol><div class="ow-how-note">${ownerIcon('check')}Already collected stamps stay marked. Each category counts once.</div></aside></div><section data-ow-last>${customer?summaryMarkup(customer):'<div class="ow-empty-recent">'+ownerIcon('passport')+'<span>Your first scan is waiting. Their next favourite is, too.</span></div>'}</section>`);
+    if(!document.hidden)startCamera();
   }
   async function authenticate(form){
     if(authBusy)return;authBusy=true;
     const button=form.querySelector('button');button.disabled=true;showError('');
     try{
-      await api(configured?'/api/owner/login':'/api/owner/setup',{method:'POST',body:{password:new FormData(form).get('password')}});
+      await api('/api/owner/login',{method:'POST',body:{code:String(new FormData(form).get('code')||'').trim()}});
       if(disposed)return;
-      configured=true;showDashboard();
-    }catch(error){if(!disposed)showError(errorText(error));}
+      showDashboard();
+    }catch(error){
+      if(!disposed){
+        showError(error?.status===401?'That owner access code wasn’t accepted. Check the code and try again.':errorText(error));
+        form.querySelector('input')?.focus();
+      }
+    }
     finally{authBusy=false;if(button.isConnected)button.disabled=false;}
   }
   async function lookup(value){
@@ -88,7 +95,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
       customer=result.customer;openCustomer(customer);
     }catch(error){
       if(disposed)return;
-      showError(errorText(error));
+      showError(`${errorText(error)} Keep the customer’s QR code on screen and try again, or paste their passport code below.`);
       if(error?.status===401){authenticated=false;showAuth();showError('Please sign in again to scan passports.');}
     }finally{lookupBusy=false;if(button?.isConnected){button.disabled=false;button.innerHTML=`Look up passport ${ownerIcon('arrow')}`;}}
   }
@@ -97,7 +104,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
     const remembered=pendingVisits.get(value.code);
     const locked=Boolean(remembered);
     pendingVisit=remembered||null;
-    return `<div class="ow-modal-header"><div class="ow-kicker">VERIFY THE PURCHASE</div><button class="ow-modal-close" data-ow-action="close-modal" aria-label="Close passport">${ownerIcon('close')}</button></div><h2 id="ow-modal-title">What did they get?</h2><div class="ow-modal-person"><span class="ow-customer-avatar">${ownerEscape(name.charAt(0).toUpperCase())}</span><div><b>${ownerEscape(name)}</b><span>${bingo.count} of 8 purchase stamps · ${ownerEscape(value.code.slice(0,4))}…${ownerEscape(value.code.slice(-4))}</span></div></div><p class="ow-modal-intro">Select every category in this purchase.<br>The free center is already covered. It never needs scanning.</p><form data-ow-form="stamps"><fieldset class="ow-category-grid ow-bingo-options" ${locked?'disabled':''}><legend class="ow-sr-only">Categories purchased</legend>${BOARD_CELLS.map(c=>{if(c.free)return `<div class="ow-category-option ow-free-cell is-collected" aria-label="Free center, automatically covered"><span class="ow-option-icon">${ownerIcon('spark')}</span><span class="ow-option-copy"><b>FREE</b><small>Always covered</small></span><span class="ow-option-tick" aria-hidden="true">✓</span></div>`;const collected=Boolean(value.stamps?.[c.id]),checked=remembered?.categories.includes(c.id);return `<label class="ow-category-option ${collected?'is-collected':''}"><input type="checkbox" name="categories" value="${c.id}" ${collected?'disabled':''} ${checked?'checked':''}><span class="ow-option-icon">${ownerIcon(c.icon)}</span><span class="ow-option-copy"><b>${ownerEscape(c.name)}</b><small>${collected?'Already collected':ownerEscape(c.description)}</small></span><span class="ow-option-tick" aria-hidden="true">${collected?'✓':''}</span></label>`;}).join('')}</fieldset><label class="ow-direct-option"><input type="checkbox" name="directOrder" ${remembered?.directOrder?'checked':''} ${locked?'disabled':''}>${ownerIcon('bag')}<span><b>They ordered directly with Umami</b><small>Add a direct-order badge for this visit.</small></span></label><p class="ow-modal-error" data-ow-save-error role="alert" ${locked?'':'hidden'}>${locked?'This visit has an unconfirmed save. Retry to check the same purchase without adding it twice.':''}</p><button class="ow-primary ow-full" type="submit" data-ow-confirm ${!locked?'disabled':''}>${locked?'Retry confirmation':'Okay, add stamps'} ${ownerIcon('check')}</button><p class="ow-save-note">${bingo.blackout?'All 8 purchase categories are collected. The free center completes their blackout.':'Only select categories from a purchase you have checked.'}</p></form>${rewardMarkup(value,bingo)}`;
+    return `<div class="ow-modal-header"><div class="ow-kicker">VERIFY THE PURCHASE</div><button class="ow-modal-close" data-ow-action="close-modal" aria-label="Close passport">${ownerIcon('close')}</button></div><h2 id="ow-modal-title">What did they get?</h2><div class="ow-modal-person"><span class="ow-customer-avatar">${ownerEscape(name.charAt(0).toUpperCase())}</span><div><b>${ownerEscape(name)}</b><span>${bingo.count} of 8 purchase stamps · ${ownerEscape(value.code.slice(0,4))}…${ownerEscape(value.code.slice(-4))}</span></div></div><p class="ow-modal-intro">Select every category in this purchase.<br>The centre QR is their free space. Select only the food purchases.</p><form data-ow-form="stamps"><fieldset class="ow-category-grid ow-bingo-options" ${locked?'disabled':''}><legend class="ow-sr-only">Categories purchased</legend>${BOARD_CELLS.map(c=>{if(c.free)return `<div class="ow-category-option ow-free-cell is-collected" aria-label="Free center, automatically covered"><span class="ow-option-icon">${ownerIcon('spark')}</span><span class="ow-option-copy"><b>FREE</b><small>Always covered</small></span><span class="ow-option-tick" aria-hidden="true">✓</span></div>`;const collected=Boolean(value.stamps?.[c.id]),checked=remembered?.categories.includes(c.id);return `<label class="ow-category-option ${collected?'is-collected':''}"><input type="checkbox" name="categories" value="${c.id}" ${collected?'disabled':''} ${checked?'checked':''}><span class="ow-option-icon">${ownerIcon(c.icon)}</span><span class="ow-option-copy"><b>${ownerEscape(c.name)}</b><small>${collected?'Already collected':ownerEscape(c.description)}</small></span><span class="ow-option-tick" aria-hidden="true">${collected?'✓':''}</span></label>`;}).join('')}</fieldset><label class="ow-direct-option"><input type="checkbox" name="directOrder" ${remembered?.directOrder?'checked':''} ${locked?'disabled':''}>${ownerIcon('bag')}<span><b>They ordered directly with Umami</b><small>Add a direct-order badge for this visit.</small></span></label><p class="ow-modal-error" data-ow-save-error role="alert" ${locked?'':'hidden'}>${locked?'This visit has an unconfirmed save. Retry to check the same purchase without adding it twice.':''}</p><button class="ow-primary ow-full" type="submit" data-ow-confirm ${!locked?'disabled':''}>${locked?'Retry confirmation':'Okay, add stamps'} ${ownerIcon('check')}</button><p class="ow-save-note">${bingo.blackout?'All 8 purchase categories are collected. The free center completes their blackout.':'Only select categories from a purchase you have checked.'}</p></form>${rewardMarkup(value,bingo)}`;
   }
   function rewardMarkup(value,bingo){
     if(!bingo.hasBingo&&!value.redeemed)return '<p class="ow-bingo-terms">Any horizontal, vertical or diagonal line earns 10%. A full card earns 25%. One reward per card; discounts cannot be combined.</p>';
@@ -171,11 +178,12 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
     finally{saveBusy=false;}
   }
   async function startCamera(){
-    if(cameraStarting||scanner||lookupBusy)return;
-    const errorEl=select('[data-ow-camera-error]');errorEl.hidden=true;
+    if(disposed||!authenticated||document.hidden||cameraStarting||scanner||lookupBusy||select('#owner-modal')?.open)return;
+    const errorEl=select('[data-ow-camera-error]');if(!errorEl)return;errorEl.hidden=true;
     cameraStarting=true;cameraController=new AbortController();
     const controller=cameraController,button=select('[data-ow-action="camera"]');
     button.disabled=true;button.textContent='Opening camera…';
+    const hint=select('[data-ow-camera-hint]');if(hint)hint.textContent='Allow camera access when your browser asks.';
     select('[data-ow-action="stop-camera"]').hidden=false;
     try{
       const video=select('[data-ow-video]');
@@ -183,11 +191,11 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
       if(disposed||controller.signal.aborted){active.stop();return;}
       scanner=active;cameraStarting=false;
       select('[data-ow-camera]').classList.add('is-scanning');button.textContent='Scanner is on';
+      if(hint)hint.textContent='Hold the customer’s QR code inside the frame.';
     }catch(error){
       if(disposed||controller.signal.aborted||error?.name==='AbortError')return;
       stopCamera();
-      errorEl.textContent=`${errorText(error)} You can also paste the code below.`;errorEl.hidden=false;
-      select('#ow-code')?.focus();
+      errorEl.textContent=`${errorText(error)} Tap Start scanner to try again and allow camera access, or paste the customer’s passport code below.`;errorEl.hidden=false;
     }
   }
   function onDialogCancel(event){if(saveBusy)event.preventDefault();else stopCamera();}
@@ -210,6 +218,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
       case'redeem':showRedemption();break;
       case'cancel-redeem':cancelRedemption();break;
       case'confirm-redeem':redeem();break;
+      case'retry-owner':initializeOwner();break;
     }
   }
   function onSubmit(event){
@@ -223,24 +232,21 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
   container.addEventListener('submit',onSubmit);
   container.addEventListener('change',updateSelection);
   document.addEventListener('visibilitychange',onVisibility);
-  showLoading();
-  (async()=>{
+  async function initializeOwner(){
+    if(disposed||bootBusy)return;
+    bootBusy=true;authenticated=false;showLoading();
     try{
-      const status=await api('/api/status');
+      await api('/api/status');
       if(disposed)return;
-      configured=Boolean(status.ownerConfigured);
-      ownerSetupAllowed=status.ownerSetupAllowed!==false;
-      if(configured){
-        try{await api('/api/owner/session');if(disposed)return;authenticated=true;}
-        catch{authenticated=false;}
-      }
+      try{await api('/api/owner/session');if(disposed)return;authenticated=true;}
+      catch(error){if(error?.status!==401)throw error;authenticated=false;}
       if(authenticated)showDashboard();else showAuth();
     }catch(error){
       if(disposed)return;
-      lastError=errorText(error);
-      shell(`<div class="ow-offline-error"><h2>The owner workspace couldn’t open.</h2><p>${ownerEscape(lastError)}</p><button class="ow-secondary" data-ow-action="exit">Back to customer passport ${ownerIcon('arrow')}</button></div>`);
-    }
-  })();
+      shell(`<div class="ow-offline-error"><h2>Owner sign-in needs a connection.</h2><p>${ownerEscape(errorText(error))}</p><p>The owner scanner needs the account service. Check your connection and try again. If this is an older Netlify upload, redeploy the complete app, including its Netlify Functions.</p><div class="ow-service-actions"><button class="ow-primary" data-ow-action="retry-owner">Try again ${ownerIcon('arrow')}</button><button class="ow-quiet" data-ow-action="exit">Back to customer passport</button></div></div>`);
+    }finally{bootBusy=false;}
+  }
+  initializeOwner();
   return()=>{
     disposed=true;stopCamera();
     select('#owner-modal')?.close();

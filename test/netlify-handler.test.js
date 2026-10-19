@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes, randomInt, scryptSync } from 'node:crypto';
 import { createApp } from '../server.js';
 import { BlobStore } from '../server/blob-store.js';
 import { createNetlifyHandler } from '../server/netlify-handler.js';
 
-function fixture({ password = '', alwaysConflict = false } = {}) {
+function fixture({ password = '', alwaysConflict = false, ownerAccessRecord = null } = {}) {
   let state = null, etag = 0;
   const blobs = {
     async getWithMetadata() { return state ? { data: structuredClone(state), etag: `"${etag}"` } : null; },
@@ -17,7 +17,7 @@ function fixture({ password = '', alwaysConflict = false } = {}) {
   };
   const handler = createNetlifyHandler({
     storeFactory: () => new BlobStore({ blobs, maxAttempts: 8, retryDelay: async () => {} }),
-    appFactory: (options) => createApp({ ...options, ownerPassword: password }),
+    appFactory: (options) => createApp({ ...options, ownerPassword: password, ownerAccessRecord }),
   });
   async function request(path, { method = 'GET', body, cookie, headers = {} } = {}) {
     const response = await handler(new Request(`https://passport.example${path}`, {
@@ -77,4 +77,22 @@ test('a failed Blobs commit cannot issue a customer session cookie', async () =>
   assert.equal(signup.status, 503);
   assert.equal(signup.headers.has('set-cookie'), false);
   assert.equal((await api.request('/api/customer')).status, 401);
+});
+
+test('Netlify owner access code works without an environment password and opens protected owner APIs', async () => {
+  const code = String(randomInt(100000, 1000000));
+  const salt = randomBytes(16).toString('hex');
+  const ownerAccessRecord = { salt, hash: scryptSync(code, salt, 64).toString('hex') };
+  const api = fixture({ ownerAccessRecord });
+  const status = await api.request('/api/status');
+  assert.deepEqual(status.value, { ownerConfigured: true, ownerSetupAllowed: false });
+  const owner = await api.request('/api/owner/login', { method: 'POST', body: { code } });
+  assert.equal(owner.status, 200);
+  assert.match(owner.headers.get('set-cookie'), /HttpOnly.*Secure/);
+  assert.equal((await api.request('/api/owner/session', { cookie: owner.cookie })).value.authenticated, true);
+  const signup = await api.request('/api/customer', { method: 'POST', body: { firstName: 'Private', lastName: 'Test', email: 'private-access@example.test' } });
+  const lookup = await api.request(`/api/owner/customer?code=${signup.value.customer.code}`, { cookie: owner.cookie });
+  assert.equal(lookup.status, 200);
+  assert.equal(lookup.value.customer.id, signup.value.customer.id);
+  assert.equal(JSON.stringify(lookup.value).includes(ownerAccessRecord.hash), false);
 });

@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomInt, randomBytes, scryptSync } from 'node:crypto';
 import { createApp } from '../server.js';
 
 const password = 'only-a-test-password';
@@ -14,7 +14,7 @@ async function fixture(t, options = {}) {
   let app;
   let base;
   async function open() {
-    app = await createApp({ dataDir, ...options });
+    app = await createApp({ dataDir, ownerAccessRecord: null, ...options });
     app.server.listen(0, '127.0.0.1');
     await once(app.server, 'listening');
     base = `http://127.0.0.1:${app.server.address().port}`;
@@ -169,7 +169,7 @@ test('cross-site requests, malformed awards and oversized payloads cannot make c
 test('private server files stay private and both app versions are served', async (t) => {
   const app = await fixture(t);
   for (const path of ['/owner', '/customer', '/owner.css', '/src/app.js']) assert.equal((await app.request(path)).status, 200);
-  for (const path of ['/server.js', '/server/store.js', '/package.json', '/.git/config', '/store.json']) assert.equal((await app.request(path)).status, 404);
+  for (const path of ['/server.js', '/server/store.js', '/server/owner-access.js', '/package.json', '/.git/config', '/store.json']) assert.equal((await app.request(path)).status, 404);
 });
 
 test('an injected owner password prevents public first-run setup and authenticates normally', async (t) => {
@@ -316,4 +316,47 @@ test('failed durable writes do not issue a session cookie or mutate the current 
   assert.equal(await app.store.read((state) => Object.keys(state.customers).length), 0);
   app.store.persist = persist;
   assert.equal((await app.customer('Retry')).status, 201);
+});
+
+function testAccessRecord() {
+  const code = String(randomInt(100000, 1000000));
+  const salt = randomBytes(16).toString('hex');
+  return { code, record: { salt, hash: scryptSync(code, salt, 64).toString('hex') } };
+}
+
+test('a private access record configures owner login without a public setup wizard', async (t) => {
+  const access = testAccessRecord();
+  const app = await fixture(t, { ownerAccessRecord: access.record });
+  const status = await app.request('/api/status');
+  assert.deepEqual(status.value, { ownerConfigured: true, ownerSetupAllowed: false });
+  assert.equal(JSON.stringify(status.value).includes(access.record.hash), false);
+  assert.equal((await app.owner()).status, 403);
+  const invalid = await app.request('/api/owner/login', { method: 'POST', body: { code: 'not-numeric' } });
+  assert.equal(invalid.status, 401);
+  const owner = await app.request('/api/owner/login', { method: 'POST', body: { code: access.code } });
+  assert.equal(owner.status, 200);
+  assert.match(owner.headers.get('set-cookie'), /HttpOnly; SameSite=Strict/);
+  assert.equal((await app.request('/api/owner/session', { cookie: owner.cookie })).status, 200);
+  assert.equal(await app.store.read((state) => state.owner), null);
+  assert.equal((await app.request('/server/owner-access.js')).status, 404);
+});
+
+test('private access-code login also works with an existing password owner and remains rate limited', async (t) => {
+  const access = testAccessRecord();
+  const app = await fixture(t, { ownerPassword: password, ownerAccessRecord: access.record });
+  const viaCode = await app.request('/api/owner/login', { method: 'POST', body: { code: access.code } });
+  const viaPassword = await app.request('/api/owner/login', { method: 'POST', body: { password } });
+  assert.equal(viaCode.status, 200);
+  assert.equal(viaPassword.status, 200);
+  const otherCode = String((Number(access.code) + 1) % 1000000).padStart(6, '0');
+  for (let count = 0; count < 10; count++) assert.equal((await app.request('/api/owner/login', { method: 'POST', body: { code: otherCode } })).status, 401);
+  assert.equal((await app.request('/api/owner/login', { method: 'POST', body: { code: access.code } })).status, 429);
+});
+
+test('an obsolete invalid password setting cannot disable a configured private access code', async (t) => {
+  const access = testAccessRecord();
+  const app = await fixture(t, { ownerPassword: 'old', ownerAccessRecord: access.record });
+  assert.equal((await app.request('/api/status')).value.ownerConfigured, true);
+  const owner = await app.request('/api/owner/login', { method: 'POST', body: { code: access.code } });
+  assert.equal(owner.status, 200);
 });
