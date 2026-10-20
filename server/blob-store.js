@@ -1,6 +1,6 @@
 import { getStore } from '@netlify/blobs';
 import { setTimeout as delay } from 'node:timers/promises';
-import { emptyStore, prepareStore } from './store.js';
+import { emptyStore, prepareStore, pruneExpiredState } from './store.js';
 
 function unavailable(message = 'Bingo storage is temporarily unavailable. Please try again.') {
   const error = new Error(message);
@@ -49,6 +49,7 @@ export class BlobStore {
   async transaction(callback) {
     for (let attempt = 0; attempt < this.maxAttempts; attempt++) {
       const { state, etag } = await this.snapshot();
+      pruneExpiredState(state);
       // Callbacks can run again after a concurrent commit. They must return any
       // response effects rather than writing cookies or sending a response here.
       const result = await callback(state);

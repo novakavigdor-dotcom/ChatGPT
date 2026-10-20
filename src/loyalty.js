@@ -33,11 +33,11 @@ export function normalizePassport(value){
   for(const key of ['firstName','lastName'])if(typeof value[key]==='string')clean[key]=value[key].slice(0,60);
   if(typeof value.email==='string')clean.email=value.email.slice(0,254);
   clean.name=[clean.firstName,clean.lastName].filter(Boolean).join(' ')||(typeof value.name==='string'?value.name.slice(0,121):'');
-  clean.needsProfile=!(clean.firstName&&clean.lastName&&clean.email);
+  clean.needsProfile=value.needsProfile===true||!(clean.firstName&&clean.lastName&&clean.email);
   for(const category of CATEGORIES){const date=value.stamps?.[category.id];if(typeof date==='string'&&!Number.isNaN(Date.parse(date)))clean.stamps[category.id]=date;}
   clean.orders=Array.isArray(value.orders)?value.orders.filter(order=>order&&typeof order.id==='string'&&typeof order.date==='string').slice(0,50).map(order=>({id:order.id,date:order.date})):[];
   clean.redeemed=value.redeemed===true;
-  clean.redeemedDiscount=clean.redeemed&&[10,25].includes(value.redeemedDiscount)?value.redeemedDiscount:0;
+  clean.redeemedDiscount=clean.redeemed?([10,25].includes(value.redeemedDiscount)?value.redeemedDiscount:null):0;
   return clean;
 }
 export function redeemReward(value){

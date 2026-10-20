@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, randomBytes, randomInt, scryptSync } from 'node:crypto';
 import { createApp } from '../server.js';
+import { createRequestId } from '../src/request-id.js';
 import { BlobStore } from '../server/blob-store.js';
 import { createNetlifyHandler } from '../server/netlify-handler.js';
 
@@ -45,21 +46,21 @@ test('Netlify requests share durable customer and owner state through the HTTP a
   const api = fixture({ password });
   const signup = await api.request('/api/customer', { method: 'POST', body: { firstName: 'Test', lastName: 'Customer', email: 'netlify@example.test' } });
   assert.equal(signup.status, 201);
-  assert.ok(signup.value.recoveryCode);
+  assert.equal(signup.value.recoveryCode, undefined);
   assert.match(signup.headers.get('set-cookie'), /HttpOnly.*Secure/);
   const customer = signup.value.customer;
   const owner = await api.request('/api/owner/login', { method: 'POST', body: { password } });
   assert.equal(owner.status, 200);
   const lookup = await api.request(`/api/owner/customer?code=${encodeURIComponent(`UMAMI:${customer.code}`)}`, { cookie: owner.cookie });
   assert.equal(lookup.value.customer.id, customer.id);
-  const visit = { code: customer.code, categories: ['maki', 'udon'], directOrder: true, requestId: randomUUID() };
+  const visit = { code: customer.code, categories: ['maki', 'udon'], directOrder: true, requestId: createRequestId() };
   const stamp = await api.request('/.netlify/functions/api/owner/stamps', { method: 'POST', cookie: owner.cookie, body: visit });
   assert.equal(stamp.status, 200);
   assert.deepEqual(stamp.value.earned, ['maki', 'udon']);
   const refreshed = await api.request('/api/customer', { cookie: signup.cookie });
   assert.deepEqual(Object.keys(refreshed.value.customer.stamps).sort(), ['maki', 'udon']);
   assert.equal(refreshed.headers.get('cache-control'), 'no-store');
-  const blocked = await api.request('/api/owner/stamps', { method: 'POST', cookie: owner.cookie, body: { ...visit, requestId: randomUUID() }, headers: { Origin: 'https://other.example' } });
+  const blocked = await api.request('/api/owner/stamps', { method: 'POST', cookie: owner.cookie, body: { ...visit, requestId: createRequestId() }, headers: { Origin: 'https://other.example' } });
   assert.equal(blocked.status, 403);
 });
 
@@ -103,9 +104,9 @@ test('Netlify stamp corrections persist audits and safely retry after a later le
   const signup = await api.request('/api/customer', { method: 'POST', body: { firstName: 'Correction', lastName: 'Test', email: 'correction-netlify@example.test' } });
   const owner = await api.request('/api/owner/login', { method: 'POST', body: { password } });
   const code = signup.value.customer.code;
-  const award = { code, categories: ['sushi-pizza', 'udon'], directOrder: true, requestId: randomUUID() };
+  const award = { code, categories: ['sushi-pizza', 'udon'], directOrder: true, requestId: createRequestId() };
   const stamped = await api.request('/api/owner/stamps', { method: 'POST', cookie: owner.cookie, body: award });
-  const removal = { code, categories: ['udon'], requestId: randomUUID(), expectedStamps: { udon: stamped.value.customer.stamps.udon } };
+  const removal = { code, categories: ['udon'], requestId: createRequestId(), expectedStamps: { udon: stamped.value.customer.stamps.udon } };
   assert.equal((await api.request('/api/owner/stamps/remove', { method: 'POST', cookie: signup.cookie, body: removal })).status, 401);
   const corrected = await api.request('/.netlify/functions/api/owner/stamps/remove', { method: 'POST', cookie: owner.cookie, body: removal });
   assert.equal(corrected.status, 200);
@@ -114,9 +115,24 @@ test('Netlify stamp corrections persist audits and safely retry after a later le
   assert.equal(polled.value.customer.stamps.udon, undefined);
   assert.equal(polled.value.customer.corrections.length, 1);
   assert.equal(polled.value.customer.orders.length, 1);
-  const restamped = await api.request('/api/owner/stamps', { method: 'POST', cookie: owner.cookie, body: { ...award, requestId: randomUUID() } });
+  const restamped = await api.request('/api/owner/stamps', { method: 'POST', cookie: owner.cookie, body: { ...award, requestId: createRequestId() } });
   const retried = await api.request('/api/owner/stamps/remove', { method: 'POST', cookie: owner.cookie, body: removal });
   assert.equal(retried.value.repeated, true);
   assert.equal(retried.value.customer.stamps.udon, restamped.value.customer.stamps.udon);
   assert.equal(retried.value.customer.corrections.length, 1);
+});
+
+test('Netlify returning customers use only last name and email to open their existing card', async () => {
+  const api = fixture({ password: 'test-owner-password-only' });
+  const signup = await api.request('/api/customer', { method: 'POST', body: { firstName: 'Returning', lastName: 'Customer', email: 'returning-netlify@example.test' } });
+  assert.equal(signup.value.recoveryCode, undefined);
+  const wrong = await api.request('/api/customer/login', { method: 'POST', body: { email: 'returning-netlify@example.test', lastName: 'Wrong' } });
+  assert.equal(wrong.status, 401);
+  const login = await api.request('/api/customer/login', { method: 'POST', body: { email: ' RETURNING-NETLIFY@EXAMPLE.TEST ', lastName: ' cUsToMeR ' } });
+  assert.equal(login.status, 200);
+  assert.match(login.headers.get('set-cookie'), /HttpOnly.*Secure/);
+  assert.equal(login.value.customer.id, signup.value.customer.id);
+  assert.equal(login.value.customer.code, signup.value.customer.code);
+  assert.equal((await api.request('/api/customer', { cookie: login.cookie })).value.customer.email, signup.value.customer.email);
+  assert.equal((await api.request('/api/owner/session', { cookie: login.cookie })).status, 401);
 });

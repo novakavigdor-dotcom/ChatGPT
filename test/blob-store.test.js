@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BlobStore, verifiedBlobsFetch } from '../server/blob-store.js';
 import { emptyStore } from '../server/store.js';
+import { REQUEST_MAX_AGE_MS } from '../src/request-id.js';
 
 // Same conditional-write contract as @netlify/blobs; shared by independent clients.
 class MemoryBlobs {
@@ -101,4 +102,38 @@ test('upstream HTTP errors with an ETag cannot masquerade as successful conditio
   assert.equal(await conflictFetch('https://storage.example/record', { method: 'PUT' }), conflict);
   const success = new Response(null, { status: 200, headers: { ETag: 'new-version' } });
   assert.equal(await verifiedBlobsFetch(async () => success)('https://storage.example/record', { method: 'PUT' }), success);
+});
+
+test('CAS retries prune expired state from the latest snapshot and preserve concurrent session renewals', async () => {
+  const now = Date.now();
+  const state = emptyStore();
+  state.sessions.expired = { expires: now - 1 };
+  state.authAttempts.old = { since: now - 16 * 60 * 1000 };
+  state.requests.old = { date: new Date(now - REQUEST_MAX_AGE_MS - 60000).toISOString() };
+  state.requests.recent = { date: new Date(now).toISOString() };
+  const blobs = new MemoryBlobs(state);
+  const originalSet = blobs.setJSON.bind(blobs);
+  let first = true;
+  blobs.setJSON = async (...args) => {
+    if (first) {
+      first = false;
+      blobs.state.sessions.expired.expires = now + 60000;
+      blobs.version += 1;
+      return { modified: false };
+    }
+    return originalSet(...args);
+  };
+  let calls = 0;
+  await client(blobs).transaction((next) => {
+    calls += 1;
+    assert.equal(next.requests.old, undefined);
+    assert.equal(next.authAttempts.old, undefined);
+    assert.equal(Boolean(next.sessions.expired), calls > 1);
+    next.customers.saved = { id: 'saved' };
+  });
+  assert.equal(calls, 2);
+  assert.equal(blobs.state.sessions.expired.expires, now + 60000);
+  assert.equal(blobs.state.requests.old, undefined);
+  assert.ok(blobs.state.requests.recent);
+  assert.ok(blobs.state.customers.saved);
 });

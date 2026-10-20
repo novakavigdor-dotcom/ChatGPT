@@ -16,12 +16,16 @@ The `dist` directory contains only public HTML, styles, browser JavaScript, imag
 
 ## Customer and owner workflow
 
-1. Customers open `/customer`, enter first name, last name, and email, then save their private recovery code. Email is recorded for the account; the app does not send email or verify the address.
+1. New customers open `/customer` and create an account with first name, last name, and email. Returning customers choose **Sign in** and enter only their last name and email. The app does not send email or verify the address.
 2. At the counter, the customer shows the personal QR code above their bingo card, or their public customer code. Tap the QR code to enlarge it.
 3. The owner opens `/owner`, enters their owner access code, allows the camera, scans the customer's QR code or enters the customer code, selects the qualifying food squares, and confirms the visit.
-4. The customer's card updates automatically within a few seconds. The owner can record the eligible discount redemption.
+4. The customer's card checks for updates every 15 seconds while the app is visible; polling pauses in hidden tabs. The owner can record the eligible discount redemption.
 
-The public QR code identifies the customer's bingo card to staff. It does not sign the customer in. Customers use their email and **private recovery code** to reopen the same account on another browser. Keep that recovery code private and save it when shown; the app does not email it.
+After signing in, the owner can also choose **Find a customer** and search by name or email. Search returns up to 20 matching accounts; refine the query to narrow the results, then choose **Open bingo**. Customer search requires an authenticated owner session. The scanner keeps running after an unrelated QR code or a code with no matching customer, so staff can scan the correct code without restarting it.
+
+Confirming only previously collected stamps leaves visit history and direct-order credit unchanged. Older records with an unknown original reward percentage show a generic redeemed label and keep the reward used.
+
+The public QR code identifies the customer's bingo card to staff; it does not sign the customer in by itself. Customers use their last name and email to reopen the same account on another browser. Anyone who knows that last name and email can open the account, as intended for convenient access.
 
 To correct a mistaken stamp, open the customer's card, choose **Correct stamps**, and untick the mistaken saved squares. Choose **Remove N stamps**, review the warning, then choose **Confirm removal**. Nothing changes until confirmation. If another staff member changed the card, choose **Reload bingo** and review the current stamps before retrying. The customer sees the corrected card automatically. Corrections preserve visit and redemption history; removing stamps does not reset a redeemed reward or allow another redemption on the same card.
 
@@ -58,6 +62,8 @@ npm run build
 ```
 
 `build:web` creates only the public `dist` directory for Netlify. `build` creates `Umami-Bingo.html` in the parent folder and, with Python 3 available, `umami-bingo.zip` containing the app and source, including deployment configuration and the private backend verifier module. Downloads exclude private customer records, session data, and the plaintext owner access code. The verifier is packaged with the server source and Function, never the public site or standalone HTML.
+
+The server cleans up expired sessions and retry receipts older than 30 days. New visit and correction requests use timestamped UUIDv7 identifiers. If an old request identifier has no retained receipt and is rejected, refresh the owner page before submitting the action again.
 
 The standalone HTML opens in a current Chrome or Edge browser without installation. It embeds browser code, QR tools, images, fonts, and licenses. It is an offline demonstration confined to the same browser; it cannot sync devices or authenticate the owner against the server. Use the hosted app for customer accounts and the shared owner system.
 

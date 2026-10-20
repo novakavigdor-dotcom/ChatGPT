@@ -7,7 +7,7 @@ const root = dirname(fileURLToPath(import.meta.url));
 const outputDirectory = resolve(root, '..');
 const outputFile = resolve(outputDirectory, 'Umami-Bingo.html');
 const zipFile = resolve(outputDirectory, 'umami-bingo.zip');
-const moduleNames = ['loyalty', 'qr', 'owner', 'app'];
+const moduleNames = ['loyalty', 'request-id', 'qr', 'owner', 'app'];
 
 async function walk(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -51,7 +51,7 @@ function embedAssets(source) {
 const imports = {};
 for (const name of moduleNames) {
   let source = embedAssets(await readFile(resolve(root, `src/${name}.js`), 'utf8'));
-  source = source.replace(/(['"])\.\/(loyalty|qr|owner|app)\.js\1/g, (_, quote, dependency) => `${quote}umami/${dependency}${quote}`);
+  source = source.replace(/(['"])\.\/(loyalty|request-id|qr|owner|app)\.js\1/g, (_, quote, dependency) => `${quote}umami/${dependency}${quote}`);
   if (/\bfrom\s*['"]\.{1,2}\//.test(source) || /\bimport\s*(?:\(\s*)?['"]\.{1,2}\//.test(source)) {
     throw new Error(`Standalone build found an unsupported relative module import in src/${name}.js.`);
   }

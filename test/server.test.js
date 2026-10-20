@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { once } from 'node:events';
 import { randomUUID, randomInt, randomBytes, scryptSync, createHash } from 'node:crypto';
 import { createApp } from '../server.js';
+import { createRequestId } from '../src/request-id.js';
 
 const password = 'only-a-test-password';
 const categories = ['maki', 'poke', 'gyoza', 'sushi-pizza', 'handroll', 'onigiri', 'udon', 'miso', 'nigiri', 'sandwich', 'salad', 'soba', 'senken', 'edamame', 'sashimi', 'platter'];
@@ -39,7 +40,7 @@ async function fixture(t, options = {}) {
   async function customer(firstName, email = `${firstName.replace(/\W/g, '').toLowerCase()}@example.test`) { return request('/api/customer', { method: 'POST', body: { firstName, lastName: 'Guest', email } }); }
   async function owner() { return request('/api/owner/setup', { method: 'POST', body: { password } }); }
   async function stamp(cookie, code, chosen = ['maki'], extra = {}) {
-    return request('/api/owner/stamps', { method: 'POST', cookie, body: { code, categories: chosen, directOrder: true, requestId: randomUUID(), ...extra } });
+    return request('/api/owner/stamps', { method: 'POST', cookie, body: { code, categories: chosen, directOrder: true, requestId: createRequestId(), ...extra } });
   }
   return { request, customer, owner, stamp, dataDir, get store() { return app.store; }, restart: async () => { await close(); await open(); } };
 }
@@ -94,7 +95,7 @@ test('owner multi-category stamping updates the customer and retries are idempot
   const code = customer.value.customer.code;
   const formatted = `umami:${code.toLowerCase().match(/.{4}/g).join('-')}`;
   assert.equal((await app.request(`/api/owner/customer?code=${formatted}`, { cookie: owner.cookie })).value.customer.id, customer.value.customer.id);
-  const requestId = randomUUID();
+  const requestId = createRequestId();
   const first = await app.stamp(owner.cookie, code, ['maki', 'poke', 'maki'], { requestId });
   assert.equal(first.status, 200);
   assert.deepEqual(first.value.earned, ['maki', 'poke']);
@@ -109,7 +110,7 @@ test('owner multi-category stamping updates the customer and retries are idempot
   assert.equal(repeatedCategory.value.customer.directOrders, 1);
   const refreshed = await app.request('/api/customer', { cookie: customer.cookie });
   assert.equal(Object.keys(refreshed.value.customer.stamps).length, 2);
-  assert.equal(refreshed.value.customer.orders.length, 2);
+  assert.equal(refreshed.value.customer.orders.length, 1);
 });
 
 test('concurrent confirmations do not lose categories or duplicate a retried visit', async (t) => {
@@ -117,7 +118,7 @@ test('concurrent confirmations do not lose categories or duplicate a retried vis
   const customer = await app.customer('Concurrent');
   const owner = await app.owner();
   const code = customer.value.customer.code;
-  const requestId = randomUUID();
+  const requestId = createRequestId();
   const results = await Promise.all([
     app.stamp(owner.cookie, code, ['maki'], { requestId }),
     app.stamp(owner.cookie, code, ['maki'], { requestId }),
@@ -187,7 +188,7 @@ test('owner authentication is rate limited and expired sessions cannot make chan
   assert.equal((await app.stamp(owner.cookie, customer.value.customer.code)).status, 401);
   assert.equal((await app.request('/api/customer', { cookie: customer.cookie })).status, 401);
   let last;
-  for (let count = 0; count < 12; count++) last = await app.request('/api/owner/login', { method: 'POST', body: { password: 'wrong-test-password' } });
+  for (let count = 0; count < 13; count++) last = await app.request('/api/owner/login', { method: 'POST', body: { password: 'wrong-test-password' } });
   assert.equal(last.status, 429);
 });
 
@@ -203,7 +204,8 @@ test('signup requires a complete profile and normalizes a unique email without a
   assert.equal(signup.value.customer.email, 'ada@example.test');
   assert.equal(signup.value.customer.needsProfile, false);
   assert.equal(signup.value.customer.version, 3);
-  assert.match(signup.value.recoveryCode, /^UMP-(?:[A-F0-9]{4}-){7}[A-F0-9]{4}$/);
+  assert.equal(signup.value.recoveryCode, undefined);
+  assert.equal(await app.store.read((state) => state.customers[signup.value.customer.id].recoveryHash), undefined);
   const duplicate = await app.customer('Other', 'ADA@example.test');
   assert.equal(duplicate.status, 409);
   const second = await app.customer('Other', 'other@example.test');
@@ -212,10 +214,10 @@ test('signup requires a complete profile and normalizes a unique email without a
   assert.equal((await app.request('/api/customer', { cookie: second.cookie })).value.customer.email, 'other@example.test');
 });
 
-test('private recovery code restores the same account on another browser but the public QR never signs in', async (t) => {
+test('last name and email open the same account on another browser while QR codes alone never sign in', async (t) => {
   const app = await fixture(t);
-  const signup = await app.customer('Recovery');
-  const { customer, recoveryCode } = signup.value;
+  const signup = await app.customer('Returning');
+  const { customer } = signup.value;
   const firstGet = await app.request('/api/customer', { cookie: signup.cookie });
   assert.equal(firstGet.value.recoveryCode, undefined);
   assert.equal(firstGet.value.customer.recoveryHash, undefined);
@@ -223,18 +225,20 @@ test('private recovery code restores the same account on another browser but the
   const lookup = await app.request(`/api/owner/customer?code=${customer.code}`, { cookie: owner.cookie });
   assert.equal(lookup.value.recoveryCode, undefined);
   assert.equal(lookup.value.customer.recoveryHash, undefined);
-  const publicLogin = await app.request('/api/customer/login', { method: 'POST', body: { email: customer.email, recoveryCode: customer.code } });
-  const unknownLogin = await app.request('/api/customer/login', { method: 'POST', body: { email: 'unknown@example.test', recoveryCode } });
+  const publicLogin = await app.request('/api/customer/login', { method: 'POST', body: { email: customer.email, lastName: customer.code } });
+  const unknownLogin = await app.request('/api/customer/login', { method: 'POST', body: { email: 'unknown@example.test', lastName: 'Guest' } });
   assert.equal(publicLogin.status, 401);
   assert.deepEqual(publicLogin.value, unknownLogin.value);
-  const login = await app.request('/api/customer/login', { method: 'POST', body: { email: customer.email.toUpperCase(), recoveryCode: recoveryCode.toLowerCase() } });
+  for (const lastName of [undefined, null, 42, [], {}, '', 'Wrong']) {
+    const malformed = await app.request('/api/customer/login', { method: 'POST', body: { email: customer.email, lastName } });
+    assert.equal(malformed.status, 401);
+    assert.deepEqual(malformed.value, unknownLogin.value);
+  }
+  const login = await app.request('/api/customer/login', { method: 'POST', body: { email: ` ${customer.email.toUpperCase()} `, lastName: ' gUeSt ' } });
   assert.equal(login.status, 200);
   assert.equal(login.value.customer.id, customer.id);
   assert.equal(login.value.recoveryCode, undefined);
   assert.equal((await app.request('/api/customer', { cookie: login.cookie })).value.customer.code, customer.code);
-  const stored = await readFile(join(app.dataDir, 'store.json'), 'utf8');
-  assert.equal(stored.includes(recoveryCode), false);
-  assert.equal(stored.includes(recoveryCode.replace(/^UMP-/, '').replace(/-/g, '')), false);
   const logout = await app.request('/api/customer/logout', { method: 'POST', cookie: login.cookie, body: {} });
   assert.equal(logout.status, 200);
   assert.equal((await app.request('/api/customer', { cookie: login.cookie })).status, 401);
@@ -279,9 +283,9 @@ test('legacy anonymous passports retain history and need a complete profile befo
   const upgraded = await app.request('/api/customer', { method: 'PATCH', cookie: old.cookie, body: { firstName: 'Legacy', lastName: 'Guest', email: 'legacy@example.test' } });
   assert.equal(upgraded.status, 200);
   assert.equal(upgraded.value.customer.needsProfile, false);
-  assert.ok(upgraded.value.recoveryCode);
+  assert.equal(upgraded.value.recoveryCode, undefined);
   assert.equal(upgraded.value.customer.id, old.value.customer.id);
-  const login = await app.request('/api/customer/login', { method: 'POST', body: { email: 'legacy@example.test', recoveryCode: upgraded.value.recoveryCode } });
+  const login = await app.request('/api/customer/login', { method: 'POST', body: { email: 'legacy@example.test', lastName: 'Guest' } });
   assert.equal(login.value.customer.id, old.value.customer.id);
 });
 
@@ -290,10 +294,10 @@ test('customer login limits persist across app restarts and duplicate concurrent
   const results = await Promise.all([app.customer('First', 'same@example.test'), app.customer('Second', 'same@example.test')]);
   assert.deepEqual(results.map((result) => result.status).sort(), [201, 409]);
   for (let count = 0; count < 12; count++) {
-    assert.equal((await app.request('/api/customer/login', { method: 'POST', body: { email: 'none@example.test', recoveryCode: 'invalid' } })).status, 401);
+    assert.equal((await app.request('/api/customer/login', { method: 'POST', body: { email: 'none@example.test', lastName: 'Unknown' } })).status, 401);
   }
   await app.restart();
-  assert.equal((await app.request('/api/customer/login', { method: 'POST', body: { email: 'none@example.test', recoveryCode: 'invalid' } })).status, 429);
+  assert.equal((await app.request('/api/customer/login', { method: 'POST', body: { email: 'none@example.test', lastName: 'Unknown' } })).status, 429);
 });
 
 test('hosted mode disables public owner setup and emits secure session cookies', async (t) => {
@@ -349,7 +353,7 @@ test('private access-code login also works with an existing password owner and r
   assert.equal(viaCode.status, 200);
   assert.equal(viaPassword.status, 200);
   const otherCode = String((Number(access.code) + 1) % 1000000).padStart(6, '0');
-  for (let count = 0; count < 10; count++) assert.equal((await app.request('/api/owner/login', { method: 'POST', body: { code: otherCode } })).status, 401);
+  for (let count = 0; count < 12; count++) assert.equal((await app.request('/api/owner/login', { method: 'POST', body: { code: otherCode } })).status, 401);
   assert.equal((await app.request('/api/owner/login', { method: 'POST', body: { code: access.code } })).status, 429);
 });
 
@@ -369,7 +373,7 @@ test('owner corrections remove multiple confirmed squares and immediately update
   const stamped = await app.stamp(owner.cookie, code, categories.slice(0, 4));
   assert.equal(stamped.value.customer.bingo.discount, 10);
   const expectedStamps = { maki: stamped.value.customer.stamps.maki, poke: stamped.value.customer.stamps.poke };
-  const body = { code, categories: ['poke', 'maki'], requestId: randomUUID(), expectedStamps };
+  const body = { code, categories: ['poke', 'maki'], requestId: createRequestId(), expectedStamps };
   assert.equal((await app.request('/api/owner/stamps/remove', { method: 'POST', body })).status, 401);
   assert.equal((await app.request('/api/owner/stamps/remove', { method: 'POST', cookie: signup.cookie, body })).status, 401);
   const corrected = await app.request('/api/owner/stamps/remove', { method: 'POST', cookie: owner.cookie, body });
@@ -393,9 +397,9 @@ test('correction retries cannot remove later legitimate re-stamps and award retr
   const signup = await app.customer('Retry');
   const owner = await app.owner();
   const code = signup.value.customer.code;
-  const awardId = randomUUID();
+  const awardId = createRequestId();
   const stamped = await app.stamp(owner.cookie, code, ['maki'], { requestId: awardId });
-  const body = { code, categories: ['maki'], requestId: randomUUID(), expectedStamps: { maki: stamped.value.customer.stamps.maki } };
+  const body = { code, categories: ['maki'], requestId: createRequestId(), expectedStamps: { maki: stamped.value.customer.stamps.maki } };
   const removed = await app.request('/api/owner/stamps/remove', { method: 'POST', cookie: owner.cookie, body });
   assert.deepEqual(removed.value.removed, ['maki']);
   const awardRetry = await app.stamp(owner.cookie, code, ['maki'], { requestId: awardId });
@@ -419,13 +423,13 @@ test('stale correction dates fail atomically, absent squares are harmless and co
   const stamped = await app.stamp(owner.cookie, code, ['maki', 'poke']);
   const oldDate = stamped.value.customer.stamps.maki;
   const remove = (body) => app.request('/api/owner/stamps/remove', { method: 'POST', cookie: owner.cookie, body });
-  const valid = { code, categories: ['maki'], requestId: randomUUID(), expectedStamps: { maki: oldDate } };
+  const valid = { code, categories: ['maki'], requestId: createRequestId(), expectedStamps: { maki: oldDate } };
   assert.equal((await remove(valid)).status, 200);
-  const absent = await remove({ ...valid, requestId: randomUUID() });
+  const absent = await remove({ ...valid, requestId: createRequestId() });
   assert.deepEqual(absent.value.removed, []);
   assert.equal(absent.value.customer.corrections.length, 1);
   await app.stamp(owner.cookie, code, ['maki']);
-  const stale = await remove({ code, categories: ['maki', 'poke'], requestId: randomUUID(), expectedStamps: { maki: oldDate, poke: stamped.value.customer.stamps.poke } });
+  const stale = await remove({ code, categories: ['maki', 'poke'], requestId: createRequestId(), expectedStamps: { maki: oldDate, poke: stamped.value.customer.stamps.poke } });
   assert.equal(stale.status, 409);
   const unchanged = (await app.request('/api/customer', { cookie: signup.cookie })).value.customer;
   assert.ok(unchanged.stamps.maki);
@@ -450,7 +454,7 @@ test('corrections never reverse a redeemed reward or allow a second redemption',
   const full = await app.stamp(owner.cookie, code, categories);
   assert.equal(full.value.customer.bingo.total, 16);
   await app.request('/api/owner/redeem', { method: 'POST', cookie: owner.cookie, body: { code } });
-  const corrected = await app.request('/api/owner/stamps/remove', { method: 'POST', cookie: owner.cookie, body: { code, categories, requestId: randomUUID(), expectedStamps: full.value.customer.stamps } });
+  const corrected = await app.request('/api/owner/stamps/remove', { method: 'POST', cookie: owner.cookie, body: { code, categories, requestId: createRequestId(), expectedStamps: full.value.customer.stamps } });
   assert.deepEqual(corrected.value.customer.stamps, {});
   assert.equal(corrected.value.customer.bingo.discount, 0);
   assert.equal(corrected.value.customer.redeemed, true);
@@ -484,7 +488,7 @@ test('version two accounts migrate exact food stamps to the new card while prese
   assert.equal(migrated.redeemedDiscount, 10);
   const legacy = await app.store.read((state) => state.customers[signup.value.customer.id].legacyStamps);
   for (const category of ['noodles', 'ramen', 'burrito', 'fish']) assert.equal(legacy[category], oldDate);
-  const login = await app.request('/api/customer/login', { method: 'POST', body: { email: migrated.email, recoveryCode: signup.value.recoveryCode } });
+  const login = await app.request('/api/customer/login', { method: 'POST', body: { email: migrated.email, lastName: migrated.lastName } });
   assert.equal(login.value.customer.id, migrated.id);
 });
 
@@ -493,7 +497,7 @@ test('receipts from the old award format still protect repeat confirmations afte
   const signup = await app.customer('OldReceipt');
   const owner = await app.owner();
   const code = signup.value.customer.code;
-  const requestId = randomUUID();
+  const requestId = createRequestId();
   await app.stamp(owner.cookie, code, ['maki'], { requestId });
   await app.store.transaction((state) => {
     delete state.requests[requestId].operation;
@@ -502,4 +506,62 @@ test('receipts from the old award format still protect repeat confirmations afte
   const repeat = await app.stamp(owner.cookie, code, ['maki'], { requestId });
   assert.equal(repeat.value.repeated, true);
   assert.equal(repeat.value.customer.orders.length, 1);
+});
+
+test('existing accounts keep legacy recovery hashes privately but sign in only with last name and email', async (t) => {
+  const app = await fixture(t);
+  const signup = await app.customer('Existing');
+  const oldCode = randomBytes(16).toString('hex');
+  const recoveryHash = createHash('sha256').update(oldCode).digest('hex');
+  const date = new Date().toISOString();
+  await app.store.transaction((state) => {
+    const customer = state.customers[signup.value.customer.id];
+    customer.recoveryHash = recoveryHash;
+    customer.lastName = 'Ｇｕｅｓｔ';
+    customer.name = 'Existing Ｇｕｅｓｔ';
+    customer.stamps = { maki: date };
+    customer.redeemed = true;
+    delete customer.redeemedDiscount;
+  });
+  await app.restart();
+  const legacy = await app.request('/api/customer', { cookie: signup.cookie });
+  assert.equal(legacy.value.customer.needsProfile, false);
+  assert.equal(legacy.value.customer.redeemedDiscount, null);
+  const rejected = await app.request('/api/customer/login', { method: 'POST', body: { email: signup.value.customer.email, recoveryCode: oldCode } });
+  assert.equal(rejected.status, 401);
+  const login = await app.request('/api/customer/login', { method: 'POST', body: { email: ` ${signup.value.customer.email.toUpperCase()} `, lastName: ' gUeSt ' } });
+  assert.equal(login.status, 200);
+  assert.equal(login.value.customer.id, signup.value.customer.id);
+  assert.equal(login.value.customer.code, signup.value.customer.code);
+  assert.deepEqual(login.value.customer.stamps, { maki: date });
+  assert.equal(login.value.customer.recoveryHash, undefined);
+  assert.equal(login.value.recoveryCode, undefined);
+  assert.equal(await app.store.read((state) => state.customers[signup.value.customer.id].recoveryHash), recoveryHash);
+});
+
+test('failed registrations are bounded for one email without blocking another customer at the same address', async (t) => {
+  const app = await fixture(t);
+  const body = { firstName: '', lastName: 'Guest', email: 'mistyped@example.test' };
+  for (let index = 0; index < 12; index++) assert.equal((await app.request('/api/customer', { method: 'POST', body })).status, 400);
+  assert.equal((await app.request('/api/customer', { method: 'POST', body })).status, 429);
+  assert.equal((await app.customer('Different', 'different@example.test')).status, 201);
+});
+
+test('request UUID casing cannot bypass award and correction receipts', async (t) => {
+  const app = await fixture(t);
+  const signup = await app.customer('Casing');
+  const owner = await app.owner();
+  const code = signup.value.customer.code;
+  const requestId = createRequestId();
+  const stamped = await app.stamp(owner.cookie, code, ['maki'], { requestId: requestId.toUpperCase() });
+  const retry = await app.stamp(owner.cookie, code, ['maki'], { requestId });
+  assert.equal(retry.value.repeated, true);
+  assert.equal(retry.value.customer.orders.length, 1);
+  const correctionId = createRequestId();
+  const correction = { code, categories: ['maki'], requestId: correctionId.toUpperCase(), expectedStamps: { maki: stamped.value.customer.stamps.maki } };
+  const removed = await app.request('/api/owner/stamps/remove', { method: 'POST', cookie: owner.cookie, body: correction });
+  assert.equal(removed.value.customer.corrections[0].id, correctionId);
+  const removedRetry = await app.request('/api/owner/stamps/remove', { method: 'POST', cookie: owner.cookie, body: { ...correction, requestId: correctionId } });
+  assert.equal(removedRetry.value.repeated, true);
+  assert.equal(removedRetry.value.customer.corrections.length, 1);
 });

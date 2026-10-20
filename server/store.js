@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, chmod, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { requestTime, REQUEST_MAX_AGE_MS } from '../src/request-id.js';
 
 export function emptyStore() {
   return { version: 1, owner: null, customers: {}, sessions: {}, requests: {}, authAttempts: {} };
@@ -11,6 +12,25 @@ export function prepareStore(state) {
     throw new Error('The private bingo store has an unsupported format.');
   }
   state.authAttempts ||= {};
+  return state;
+}
+
+// New request IDs expire with their embedded timestamp. Unknown legacy IDs are
+// rejected by the API, so removing an old receipt can never reapply its change.
+export function pruneExpiredState(state, now = Date.now()) {
+  for (const [key, entry] of Object.entries(state.sessions)) {
+    if (!entry || !Number.isFinite(entry.expires) || entry.expires <= now) delete state.sessions[key];
+  }
+  for (const [key, entry] of Object.entries(state.authAttempts || {})) {
+    if (!entry || !Number.isFinite(entry.since) || now - entry.since >= 15 * 60 * 1000) delete state.authAttempts[key];
+  }
+  for (const [key, entry] of Object.entries(state.requests)) {
+    const date = Date.parse(entry?.date);
+    // Keep malformed legacy dates rather than guessing a receipt's age.
+    // A permitted future-skewed UUID must itself expire before its receipt goes.
+    const latestDate = Math.max(date, requestTime(key) ?? date);
+    if (Number.isFinite(latestDate) && now - latestDate > REQUEST_MAX_AGE_MS) delete state.requests[key];
+  }
   return state;
 }
 
@@ -58,6 +78,7 @@ export class Store {
     const operation = this.queue.then(async () => {
       await this.ready;
       const next = structuredClone(this.state);
+      pruneExpiredState(next);
       const result = await callback(next);
       await this.persist(next);
       this.state = next;

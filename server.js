@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { Store } from './server/store.js';
 import { OWNER_ACCESS_RECORD } from './server/owner-access.js';
 import { CATEGORIES, getBingoStatus } from './src/loyalty.js';
+import { requestTime, REQUEST_MAX_AGE_MS, FUTURE_SKEW_MS } from './src/request-id.js';
 
 const deriveKey = promisify(scrypt);
 const root = dirname(fileURLToPath(import.meta.url));
@@ -30,8 +31,9 @@ function normalizeCode(value) {
   return code;
 }
 function publicCustomer(customer) {
-  const { id, code, version, firstName = '', lastName = '', email = '', name, stamps, directOrders, orders, redeemed, redeemedDiscount = 0 } = customer;
-  const needsProfile = !firstName || !lastName || !email || !customer.recoveryHash;
+  const { id, code, version, firstName = '', lastName = '', email = '', name, stamps, directOrders, orders, redeemed } = customer;
+  const redeemedDiscount = customer.redeemedDiscount === undefined ? (redeemed ? null : 0) : customer.redeemedDiscount;
+  const needsProfile = !firstName || !lastName || !email;
   return { id, code, version, firstName, lastName, email, name, needsProfile, stamps: { ...stamps }, directOrders, orders: structuredClone(orders), corrections: structuredClone(customer.corrections || []), redeemed, redeemedDiscount, bingo: getBingoStatus(stamps) };
 }
 function findCustomer(state, code) {
@@ -47,24 +49,27 @@ function profileFrom(body) {
   if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(400, 'Enter a valid email address.');
   return { firstName, lastName, email, name: `${firstName} ${lastName}` };
 }
-function recoverySecret() {
-  const hex = randomBytes(16).toString('hex').toUpperCase();
-  return { recoveryCode: `UMP-${hex.match(/.{4}/g).join('-')}`, recoveryHash: digest(hex) };
+function normalizedLastName(value) {
+  return typeof value === 'string' ? value.trim().normalize('NFKC').toLowerCase() : '';
 }
-function recoveryHashFrom(value) {
-  if (typeof value !== 'string') return null;
-  const normalized = value.trim().replace(/^UMP[\s:-]*/i, '').replace(/[\s-]/g, '').toUpperCase();
-  return /^[A-F0-9]{32}$/.test(normalized) ? digest(normalized) : null;
+function requestIdentity(state, raw) {
+  if (typeof raw !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(raw)) fail(400, 'A valid request ID is required to save this change.');
+  const id = raw.toLowerCase();
+  const previous = state.requests[id] || state.requests[raw] || state.requests[raw.toUpperCase()];
+  if (!previous) {
+    const timestamp = requestTime(id);
+    if (timestamp === null) fail(409, 'This save request is no longer recognized. Reload the customer before trying again.');
+    if (timestamp - Date.now() > FUTURE_SKEW_MS) fail(400, 'This request has an invalid future date. Reload the customer before trying again.');
+    if (Date.now() - timestamp > REQUEST_MAX_AGE_MS) fail(410, 'This save request has expired. Reload the customer before trying again.');
+  }
+  return { id, previous };
 }
 function applyProfile(state, customer, profile) {
-  if (Object.values(state.customers).some((entry) => entry.id !== customer.id && entry.email === profile.email)) fail(409, 'An account already uses this email. Sign in with its private recovery code.');
+  if (Object.values(state.customers).some((entry) => entry.id !== customer.id && entry.email === profile.email)) fail(409, 'Unable to create this account. If you registered before, sign in with your last name and email.');
   Object.assign(customer, profile);
-  if (customer.recoveryHash) return null;
-  const secret = recoverySecret();
-  customer.recoveryHash = secret.recoveryHash;
-  return secret.recoveryCode;
 }
 function migrateCustomer(customer) {
+  if (customer.redeemedDiscount === undefined) customer.redeemedDiscount = customer.redeemed ? null : 0;
   if (customer.version >= 3) return;
   // The old broad categories cannot prove which new bingo item was bought.
   // Preserve that history while retaining only exact matching paid squares.
@@ -164,31 +169,43 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
   if (ownerAccessRecord !== null && (!ownerAccessRecord || typeof ownerAccessRecord.salt !== 'string' || !/^[a-f0-9]{128}$/i.test(ownerAccessRecord.hash || ''))) {
     throw new Error('The private owner access record is invalid.');
   }
-  const store = injectedStore || new Store(dataDir);
-  await store.ready;
-  if (await store.read((state) => Object.values(state.customers).some((customer) => customer.version < 3))) {
-    await store.transaction((state) => { for (const customer of Object.values(state.customers)) migrateCustomer(customer); });
-  }
+  const persistentStore = injectedStore || new Store(dataDir);
+  await persistentStore.ready;
+  const validLegacyPassword = typeof ownerPassword === 'string' && ownerPassword.length >= 10 && ownerPassword.length <= 256;
   if (ownerPassword) {
-    const validLegacyPassword = typeof ownerPassword === 'string' && ownerPassword.length >= 10 && ownerPassword.length <= 256;
     if (!validLegacyPassword && !ownerAccessRecord) throw new Error('OWNER_PASSWORD must contain 10 to 256 characters.');
-    // An obsolete password setting must not disable the configured access code.
-    if (validLegacyPassword && !await store.read((state) => Boolean(state.owner))) {
-      await store.transaction(async (state) => { if (!state.owner) state.owner = await passwordRecord(ownerPassword); });
-    }
   }
-  async function loginRateLimit(request, scope = 'owner') {
-    const allowed = await store.transaction((state) => {
+  const migrate = (state) => { for (const customer of Object.values(state.customers)) migrateCustomer(customer); return state; };
+  // Migrate the one fresh snapshot already needed by each operation. Reads stay
+  // read-only on durable storage; the next mutation persists migrated records.
+  const store = {
+    read: (callback) => persistentStore.read((state) => callback(migrate(state))),
+    transaction: (callback) => persistentStore.transaction(async (state) => {
+      migrate(state);
+      if (validLegacyPassword && !state.owner) state.owner = await passwordRecord(ownerPassword);
+      return callback(state);
+    }),
+  };
+  async function authentication(request, scope, identity, callback) {
+    const result = await store.transaction(async (state) => {
       state.authAttempts ||= {};
       const now = Date.now();
       for (const [address, entry] of Object.entries(state.authAttempts)) if (now - entry.since >= 15 * 60 * 1000) delete state.authAttempts[address];
-      const key = `${scope}:${digest(String(clientAddress(request)))}`;
-      const entry = state.authAttempts[key] || { since: now, count: 0 };
-      entry.count += 1;
-      state.authAttempts[key] = entry;
-      return entry.count <= 12;
+      const key = `${scope}:${digest(`${String(clientAddress(request))}|${identity}`)}`;
+      const entry = state.authAttempts[key];
+      if (entry?.count >= 12) return { failure: { status: 429, message: 'Too many failed attempts. Try again in 15 minutes.' } };
+      try {
+        const value = await callback(state);
+        delete state.authAttempts[key];
+        return { value };
+      } catch (error) {
+        if (!(error instanceof APIError) || error.status >= 500) throw error;
+        state.authAttempts[key] = { since: entry?.since || now, count: (entry?.count || 0) + 1 };
+        return { failure: { status: error.status, message: error.message } };
+      }
     });
-    if (!allowed) fail(429, 'Too many sign-in attempts. Try again in 15 minutes.');
+    if (result.failure) fail(result.failure.status, result.failure.message);
+    return result.value;
   }
   function signedIn(response, result, status = 200) {
     response.setHeader('Set-Cookie', result.cookie);
@@ -197,7 +214,7 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
 
   async function api(request, response, url) {
     const route = `${request.method} ${url.pathname}`;
-    if (route === 'GET /api/status') return json(response, await store.read((state) => ({ ownerConfigured: Boolean(state.owner || ownerAccessRecord), ownerSetupAllowed: allowOwnerSetup && !ownerAccessRecord })));
+    if (route === 'GET /api/status') return json(response, await store.read((state) => ({ ownerConfigured: Boolean(state.owner || ownerAccessRecord || validLegacyPassword), ownerSetupAllowed: allowOwnerSetup && !ownerAccessRecord })));
     if (route === 'GET /api/health') return json(response, { ready: true });
     if (route === 'GET /api/customer') return json(response, await store.read((state) => {
       const auth = session(state, request, 'customer');
@@ -211,25 +228,33 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       session(state, request, 'owner');
       return { customer: publicCustomer(findCustomer(state, normalizeCode(url.searchParams.get('code')))) };
     }));
+    if (route === 'GET /api/owner/customers') return json(response, await store.read((state) => {
+      session(state, request, 'owner');
+      const query = (url.searchParams.get('q') || '').trim().normalize('NFKC').toLowerCase();
+      if (query.length < 2 || query.length > 120) fail(400, 'Search using between 2 and 120 characters.');
+      const customers = Object.values(state.customers).filter((customer) => [customer.name || `${customer.firstName || ''} ${customer.lastName || ''}`, customer.email || ''].some((value) => value.normalize('NFKC').toLowerCase().includes(query))).slice(0, 20).map(({ id, name, email, code }) => ({ id, name, email, code }));
+      return { customers };
+    }));
     if (!['POST', 'PATCH'].includes(request.method)) fail(404, 'This API endpoint was not found.');
     checkMutationOrigin(request);
     const body = await bodyFrom(request);
     if (route === 'POST /api/customer') {
-      const profile = profileFrom(body);
-      const result = await store.transaction((state) => {
+      const registrationEmail = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+      const result = await authentication(request, 'registration', registrationEmail, (state) => {
+        const profile = profileFrom(body);
         // Repeated setup taps should not silently replace an existing bingo card.
         try {
           const auth = session(state, request, 'customer');
           const customer = state.customers[auth.customerId];
           if (customer.email && customer.email !== profile.email) fail(409, 'You are already signed in. Sign out before creating another account.');
-          const recoveryCode = applyProfile(state, customer, profile);
-          return { payload: { customer: publicCustomer(customer), ...(recoveryCode ? { recoveryCode } : {}) } };
+          applyProfile(state, customer, profile);
+          return { payload: { customer: publicCustomer(customer) } };
         } catch (error) { if (error.status !== 401) throw error; }
         const id = randomUUID();
         const customer = { id, code: randomBytes(16).toString('hex').toUpperCase(), version: 3, stamps: {}, directOrders: 0, orders: [], corrections: [], redeemed: false, redeemedDiscount: 0 };
-        const recoveryCode = applyProfile(state, customer, profile);
+        applyProfile(state, customer, profile);
         state.customers[id] = customer;
-        return { cookie: newSessionCookie(state, request, 'customer', id, secureCookies), payload: { customer: publicCustomer(customer), recoveryCode } };
+        return { cookie: newSessionCookie(state, request, 'customer', id, secureCookies), payload: { customer: publicCustomer(customer) } };
       });
       if (result.cookie) return signedIn(response, result, 201);
       return json(response, result.payload, 201);
@@ -239,17 +264,16 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       return json(response, await store.transaction((state) => {
         const auth = session(state, request, 'customer');
         const customer = state.customers[auth.customerId];
-        const recoveryCode = applyProfile(state, customer, profile);
-        return { customer: publicCustomer(customer), ...(recoveryCode ? { recoveryCode } : {}) };
+        applyProfile(state, customer, profile);
+        return { customer: publicCustomer(customer) };
       }));
     }
     if (route === 'POST /api/customer/login') {
-      await loginRateLimit(request, 'customer');
       const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
-      const recoveryHash = recoveryHashFrom(body.recoveryCode);
-      const result = await store.transaction((state) => {
+      const lastName = normalizedLastName(body.lastName);
+      const result = await authentication(request, 'customer', email, (state) => {
         const customer = Object.values(state.customers).find((entry) => entry.email === email);
-        if (!customer?.recoveryHash || !recoveryHash || !timingSafeEqual(Buffer.from(customer.recoveryHash, 'hex'), Buffer.from(recoveryHash, 'hex'))) fail(401, 'The email or private recovery code is incorrect.');
+        if (!customer || !lastName || normalizedLastName(customer.lastName) !== lastName) fail(401, 'The last name or email is incorrect.');
         return { cookie: newSessionCookie(state, request, 'customer', customer.id, secureCookies), payload: { customer: publicCustomer(customer) } };
       });
       return signedIn(response, result);
@@ -264,9 +288,8 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
     }
     if (route === 'POST /api/owner/setup') {
       if (!allowOwnerSetup || ownerAccessRecord) fail(403, 'Owner setup is disabled. Sign in using the private owner access code.');
-      await loginRateLimit(request);
-      const password = passwordFrom(body);
-      const result = await store.transaction(async (state) => {
+      const result = await authentication(request, 'owner', '', async (state) => {
+        const password = passwordFrom(body);
         if (state.owner) fail(409, 'The owner is already set up. Sign in instead.');
         state.owner = await passwordRecord(password);
         return { cookie: newSessionCookie(state, request, 'owner', undefined, secureCookies), payload: { authenticated: true } };
@@ -274,11 +297,10 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       return signedIn(response, result, 201);
     }
     if (route === 'POST /api/owner/login') {
-      await loginRateLimit(request);
       const usingCode = body.code !== undefined;
       const code = typeof body.code === 'string' ? body.code.trim() : '';
-      const password = usingCode ? null : passwordFrom(body);
-      const result = await store.transaction(async (state) => {
+      const result = await authentication(request, 'owner', '', async (state) => {
+        const password = usingCode ? null : passwordFrom(body);
         if (usingCode) {
           if (!ownerAccessRecord || !/^[0-9]{1,64}$/.test(code) || !await passwordMatches(code, ownerAccessRecord)) fail(401, 'That owner access code is incorrect.');
         } else {
@@ -302,10 +324,9 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       const code = normalizeCode(body.code);
       if (!Array.isArray(body.categories) || body.categories.length === 0 || body.categories.length > categoryIds.length || body.categories.some((category) => !categoryIds.includes(category))) fail(400, 'Select at least one valid category.');
       if (typeof body.directOrder !== 'boolean') fail(400, 'Specify whether this was a direct order.');
-      if (typeof body.requestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.requestId)) fail(400, 'A valid request ID is required to save this visit.');
+      const { id: requestId, previous } = requestIdentity(state, body.requestId);
       const categories = [...new Set(body.categories)].sort();
       const fingerprint = digest(JSON.stringify({ operation: 'award', code, categories, directOrder: body.directOrder }));
-      const previous = state.requests[body.requestId];
       if (previous) {
         const legacyFingerprint = !previous.operation && digest(JSON.stringify({ code, categories, directOrder: body.directOrder }));
         if (previous.fingerprint !== fingerprint && previous.fingerprint !== legacyFingerprint) fail(409, 'This request ID was already used for a different visit.');
@@ -317,24 +338,25 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       const previousVisit = Date.parse(customer.orders[0]?.date);
       const date = new Date(Math.max(Date.now(), Number.isNaN(previousVisit) ? 0 : previousVisit + 1)).toISOString();
       const earned = categories.filter((category) => !customer.stamps[category]);
-      for (const category of earned) customer.stamps[category] = date;
-      if (body.directOrder) customer.directOrders += 1;
-      customer.orders.unshift({ id: randomUUID(), date, total: 0, categories, directOrder: body.directOrder });
-      customer.orders = customer.orders.slice(0, 50);
-      state.requests[body.requestId] = { operation: 'award', fingerprint, earned, date };
+      if (earned.length) {
+        for (const category of earned) customer.stamps[category] = date;
+        if (body.directOrder) customer.directOrders += 1;
+        customer.orders.unshift({ id: randomUUID(), date, total: 0, categories, directOrder: body.directOrder });
+        customer.orders = customer.orders.slice(0, 50);
+      }
+      state.requests[requestId] = { operation: 'award', fingerprint, earned, date };
       return { customer: publicCustomer(customer), earned };
     }));
     if (route === 'POST /api/owner/stamps/remove') return json(response, await store.transaction((state) => {
       session(state, request, 'owner');
       const code = normalizeCode(body.code);
       if (!Array.isArray(body.categories) || body.categories.length === 0 || body.categories.length > categoryIds.length || body.categories.some((category) => !categoryIds.includes(category))) fail(400, 'Select at least one valid category to correct.');
-      if (typeof body.requestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.requestId)) fail(400, 'A valid request ID is required to save this correction.');
+      const { id: requestId, previous } = requestIdentity(state, body.requestId);
       const categories = [...new Set(body.categories)].sort();
       const expected = body.expectedStamps;
       if (!expected || typeof expected !== 'object' || Array.isArray(expected) || categories.some((category) => !Object.hasOwn(expected, category) || typeof expected[category] !== 'string' || Number.isNaN(Date.parse(expected[category])))) fail(400, 'Include the original stamp date for each category being corrected.');
       const expectedStamps = Object.fromEntries(categories.map((category) => [category, expected[category]]));
       const fingerprint = digest(JSON.stringify({ operation: 'remove', code, categories, expectedStamps }));
-      const previous = state.requests[body.requestId];
       if (previous) {
         if (previous.operation !== 'remove' || previous.fingerprint !== fingerprint) fail(409, 'This request ID was already used for a different change.');
         return { customer: publicCustomer(findCustomer(state, code)), removed: previous.removed, repeated: true };
@@ -347,9 +369,9 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       const date = new Date().toISOString();
       if (removed.length) {
         customer.corrections ||= [];
-        customer.corrections.push({ id: body.requestId, date, categories: removed, previousStamps, actor: 'owner' });
+        customer.corrections.push({ id: requestId, date, categories: removed, previousStamps, actor: 'owner' });
       }
-      state.requests[body.requestId] = { operation: 'remove', fingerprint, removed, date };
+      state.requests[requestId] = { operation: 'remove', fingerprint, removed, date };
       return { customer: publicCustomer(customer), removed };
     }));
     if (route === 'POST /api/owner/redeem') return json(response, await store.transaction((state) => {
@@ -405,7 +427,7 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
     }
   });
   server.requestTimeout = 15_000;
-  return { server, store };
+  return { server, store: persistentStore };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

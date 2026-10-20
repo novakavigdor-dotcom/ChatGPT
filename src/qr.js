@@ -12696,9 +12696,11 @@ function cameraMessage(error) {
 /**
  * Call only from a Scan button. Resolves to { stop() }; stop closes every track.
  * Optional AbortSignal also stops a camera that finishes opening after its UI closes.
- * A detected QR stops the camera before calling onResult(rawPayload).
+ * By default a detected QR stops the camera before calling onResult(rawPayload).
+ * With continuous: true, keep scanning until stop() or abort; await each callback
+ * and throttle repeated values so an invalid QR cannot flood customer lookups.
  */
-export async function startQrScanner(videoElement, onResult, { signal } = {}) {
+export async function startQrScanner(videoElement, onResult, { signal, continuous = false } = {}) {
   if (!videoElement || typeof onResult !== 'function') throw new TypeError('The scanner needs a video element and result callback.');
   if (!globalThis.isSecureContext || !globalThis.navigator?.mediaDevices?.getUserMedia) {
     throw new Error('Camera scanning needs a secure HTTPS connection or localhost. You can also enter the customer’s bingo code.');
@@ -12709,6 +12711,8 @@ export async function startQrScanner(videoElement, onResult, { signal } = {}) {
   let stoppedStream;
   let timer;
   let stopped = false;
+  let lastPayload = null;
+  let lastResultAt = 0;
   const canvas = document.createElement('canvas');
   const context = canvas.getContext('2d', { willReadFrequently: true });
   if (!context) throw new Error('This browser cannot read camera images. Enter the customer’s bingo code instead.');
@@ -12788,11 +12792,19 @@ export async function startQrScanner(videoElement, onResult, { signal } = {}) {
       }
     }
     if (stopped) return;
-    if (payload) {
-      stop();
-      onResult(payload);
-      return;
+    if (payload && (!continuous || payload !== lastPayload || Date.now() - lastResultAt >= 1500)) {
+      lastPayload = payload;
+      if (!continuous) stop();
+      try {
+        await onResult(payload);
+      } catch {
+        // The caller presents lookup errors. A rejected lookup must not leave an
+        // unhandled promise or stop a continuous camera from reading the next QR.
+      }
+      lastResultAt = Date.now();
+      if (!continuous || stopped) return;
     }
+    if (stopped) return;
     timer = setTimeout(scanFrame, 160);
   }
   timer = setTimeout(scanFrame, 0);
