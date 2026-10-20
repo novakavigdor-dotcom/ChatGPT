@@ -186,7 +186,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
       const collected=Boolean(value.stamps?.[c.id]);
       const selected=correction?collected&&!pendingCorrection?.categories.includes(c.id):Boolean(pendingVisit?.categories.includes(c.id));
       const disabled=correction?!collected:collected;
-      const detail=correction?collected?'Saved stamp':'Not stamped':collected?'Already collected':c.description;
+      const detail=correction?collected?'Saved stamp':'Not stamped':collected?'Saved stamp':c.description;
       return `<label class="ow-category-option ${collected?'is-collected':''}"><input type="checkbox" name="categories" value="${c.id}" ${disabled?'disabled':''} ${selected?'checked':''}><span class="ow-option-icon">${ownerIcon(c.icon)}</span><span class="ow-option-copy"><b>${ownerEscape(c.name)}</b><small data-ow-category-note>${ownerEscape(detail)}</small></span><span class="ow-option-tick" aria-hidden="true">${collected?'✓':''}</span></label>`;
     }).join('')}</fieldset>`;
   }
@@ -197,7 +197,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
   function modalMarkup(value,notice=''){
     const bingo=getBingoStatus(value.stamps),name=ownerCustomerName(value),total=bingo.total||BOARD_CELLS.length;
     const locked=Boolean(pendingVisit);
-    const normal=`<div class="ow-mode-bar"><span>Verify this purchase</span><button class="ow-quiet" data-ow-action="correct-stamps" ${locked||!bingo.count?'disabled':''}>Correct stamps</button></div><p class="ow-modal-intro">Select every category in this purchase.<br>Only choose food the customer purchased.</p><form data-ow-form="stamps">${categoryGridMarkup(value,{locked})}<label class="ow-direct-option"><input type="checkbox" name="directOrder" ${pendingVisit?.directOrder?'checked':''} ${locked?'disabled':''}>${ownerIcon('bag')}<span><b>They ordered directly with Umami</b><small>Add a direct-order badge for this visit.</small></span></label><p class="ow-modal-error" data-ow-save-error role="alert" ${locked?'':'hidden'}>${locked?'This visit has an unconfirmed save. Retry to check the same purchase without adding it twice.':''}</p><button class="ow-primary ow-full" type="submit" data-ow-confirm ${locked?'':'disabled'}>${locked?'Retry confirmation':'Okay, add stamps'} ${ownerIcon('check')}</button><p class="ow-save-note">${bingo.blackout?`All ${total} purchase categories are collected. Their card is a blackout.`:'Only select categories from a purchase you have checked.'}</p></form>${rewardMarkup(value,bingo)}`;
+    const normal=`<div class="ow-mode-bar"><span>Verify this purchase</span><button class="ow-quiet" data-ow-action="correct-stamps" ${locked||!bingo.count?'disabled':''}>Correct stamps</button></div><p class="ow-modal-intro">Select every category in this purchase. Green stamps are already saved.</p><p class="ow-stamp-key"><span>Green = saved</span><span>Red = selected for this purchase</span></p><form data-ow-form="stamps">${categoryGridMarkup(value,{locked})}${bingo.count?`<div class="ow-correction-shortcut"><p>Need to undo a green stamp?</p><button type="button" class="ow-secondary" data-ow-action="correct-stamps" ${locked?'disabled':''}>Correct saved stamps</button></div>`:''}<label class="ow-direct-option"><input type="checkbox" name="directOrder" ${pendingVisit?.directOrder?'checked':''} ${locked?'disabled':''}>${ownerIcon('bag')}<span><b>They ordered directly with Umami</b><small>Add a direct-order badge for this visit.</small></span></label><p class="ow-modal-error" data-ow-save-error role="alert" ${locked?'':'hidden'}>${locked?'This visit has an unconfirmed save. Retry to check the same purchase without adding it twice.':''}</p><button class="ow-primary ow-full" type="submit" data-ow-confirm ${locked?'':'disabled'}>${locked?'Retry confirmation':'Okay, add stamps'} ${ownerIcon('check')}</button><p class="ow-save-note">${bingo.blackout?`All ${total} purchase categories are collected. Their card is a blackout.`:'Only select categories from a purchase you have checked.'}</p></form>${rewardMarkup(value,bingo)}`;
     return `<div class="ow-modal-header"><div class="ow-kicker">${correctionMode?'CHECK THE SAVED STAMPS':'VERIFY THE PURCHASE'}</div><button class="ow-modal-close" data-ow-action="close-modal" aria-label="Close bingo">${ownerIcon('close')}</button></div><h2 id="ow-modal-title">${correctionMode?'Correct their bingo.':'What did they get?'}</h2><div class="ow-modal-person"><span class="ow-customer-avatar">${ownerEscape(name.charAt(0).toUpperCase())}</span><div><b>${ownerEscape(name)}</b>${value.email?`<small class="ow-modal-email">${ownerEscape(value.email)}</small>`:''}<span>${bingo.count} of ${total} purchase stamps · ${ownerEscape(value.code.slice(0,4))}…${ownerEscape(value.code.slice(-4))}</span></div></div>${notice?`<p class="ow-correction-success" role="status">${ownerEscape(notice)}</p>`:''}${correctionMode?correctionMarkup(value):normal}`;
   }
   function rewardMarkup(value,bingo){
@@ -238,7 +238,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
     const payload=pendingVisit;saveBusy=true;
     const button=select('[data-ow-confirm]');button.disabled=true;button.textContent='Adding discoveries…';
     form.querySelectorAll('fieldset,input').forEach(el=>el.disabled=true);
-    const correction=select('[data-ow-action="correct-stamps"]');if(correction)correction.disabled=true;
+    container.querySelectorAll('[data-ow-action="correct-stamps"]').forEach(button=>button.disabled=true);
     const reward=select('[data-ow-action="redeem"]');if(reward)reward.disabled=true;
     const errorEl=select('[data-ow-save-error]');errorEl.hidden=true;
     try{
@@ -266,7 +266,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
   function enterCorrection(){
     if(saveBusy||pendingVisit||!modalCustomer||!getBingoStatus(modalCustomer.stamps).count)return;
     if(select('[data-ow-form="stamps"] input[name="categories"]:checked')){
-      const error=select('[data-ow-save-error]');error.textContent='Confirm or untick the current purchase selections before correcting saved stamps.';error.hidden=false;
+      const error=select('[data-ow-save-error]');error.textContent='Untick the red purchase selections or confirm them first. Then choose Correct stamps to remove a saved green stamp.';error.hidden=false;error.tabIndex=-1;error.focus();
       return;
     }
     openCustomer(modalCustomer,{correction:true});

@@ -107,6 +107,7 @@ directories = {
     'netlify': {'.js'},
     'assets': {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.ico', '.ttf', '.woff', '.woff2', '.txt', '.md'},
     'test': {'.js'},
+    'marketing': {'.html', '.png', '.pdf', '.md', '.txt', '.js', '.mjs'},
 }
 excluded = {'node_modules', 'umami-data', 'data'}
 def safe(item):

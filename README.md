@@ -1,6 +1,6 @@
 # Umami Bingo
 
-A customer loyalty app with personal QR codes, an owner scanner, and a 4×4 food bingo card. All 16 squares are food categories. Complete any row, column, or diagonal of four stamps for 10% off, or collect all 16 for 25% off. Each card can redeem one reward. The customer's personal QR code sits above the grid, leaving all 16 food squares available.
+A customer loyalty app with personal QR codes, an owner scanner, and an illustrated 4×4 food bingo card. The home screen uses black ink food drawings, bold labels, cream squares and black grid lines. All 16 squares are food categories. Complete any row, column, or diagonal of four stamps for 10% off, or collect all 16 for 25% off. Each card can redeem one reward. The customer's personal QR code sits above the grid, leaving all 16 food squares available.
 
 ## Deploy the working app on Netlify
 
@@ -27,7 +27,7 @@ Confirming only previously collected stamps leaves visit history and direct-orde
 
 The public QR code identifies the customer's bingo card to staff; it does not sign the customer in by itself. Customers use their last name and email to reopen the same account on another browser. Anyone who knows that last name and email can open the account, as intended for convenient access.
 
-To correct a mistaken stamp, open the customer's card, choose **Correct stamps**, and untick the mistaken saved squares. Choose **Remove N stamps**, review the warning, then choose **Confirm removal**. Nothing changes until confirmation. If another staff member changed the card, choose **Reload bingo** and review the current stamps before retrying. The customer sees the corrected card automatically. Corrections preserve visit and redemption history; removing stamps does not reset a redeemed reward or allow another redemption on the same card.
+Green squares in the owner's purchase view are saved stamps; red squares are selections for the current purchase. To correct a mistaken stamp, open the customer's card and choose **Correct stamps** above the grid or **Correct saved stamps** beneath it. Confirm or untick any red purchase selections first. In correction mode, untick the mistaken saved squares. Choose **Remove N stamps**, review the warning, then choose **Confirm removal**. Nothing changes until confirmation. If another staff member changed the card, choose **Reload bingo** and review the current stamps before retrying. The customer sees the corrected card automatically. Corrections preserve visit and redemption history; removing stamps does not reset a redeemed reward or allow another redemption on the same card.
 
 Phone camera scanning requires HTTPS and camera permission. Manual customer-code entry works when scanning is unavailable. Owner and customer devices must use the same deployed site.
 
@@ -54,6 +54,8 @@ Use the configured owner access code at `/owner`. Local data is stored outside t
 `localhost` refers to the current device. Use the deployed HTTPS address to connect a phone to the app. For another Node host, provide persistent disk and an HTTPS proxy that preserves Host, set `UMAMI_HTTPS=1`, and set `PORT` if required.
 
 ## Development and downloads
+
+Customer advertisements are in [marketing](marketing/): a [printable Letter poster](marketing/Umami-Bingo-Poster.pdf), a [1080×1350 social image](marketing/Umami-Bingo-Ad.png), and [caption text](marketing/caption.md). Both advertisements include a real QR code pointing to the customer app. The editable layout is [poster.html](marketing/poster.html); the source download also includes these marketing files.
 
 ```sh
 npm test
