@@ -1,4 +1,4 @@
-import {BOARD_CELLS,getBingoStatus} from './loyalty.js';
+import {BOARD_CELLS,getBingoStatus,getRewardStatus} from './loyalty.js';
 import {startQrScanner} from './qr.js';
 import {createRequestId} from './request-id.js';
 
@@ -24,7 +24,8 @@ function ownerReadCode(value){
 export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
   let disposed=false,authenticated=false,bootBusy=false,customer=null,scanner=null,cameraController=null,cameraStarting=false,lookupBusy=false,authBusy=false,saveBusy=false,modalCustomer=null,pendingVisit=null,correctionMode=false,pendingCorrection=null,correctionStale=false;
   let searchQuery='',searchResults=[],searchBusy=false,searchPerformed=false,searchError='',searchController=null,searchGeneration=0,ownerSessionGeneration=0,openingSearchCode='',lastScanPayload='',lastScanAttempt=0;
-  const pendingVisits=new Map(),pendingCorrections=new Map();
+  let pendingRedemption=null,selectedRewardId=null,redemptionNeedsReload=false,redemptionError='',rewardUsedThisReview=false;
+  const pendingVisits=new Map(),pendingCorrections=new Map(),pendingRedemptions=new Map();
   const select=selector=>container.querySelector(selector);
   const statusLabel=offline?'Offline demo · same browser only':'OWNER WORKSPACE';
   const errorText=error=>error?.message||'Something went wrong. Please try again.';
@@ -50,7 +51,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
     dialog.addEventListener('cancel',onDialogCancel);
     dialog.addEventListener('close',()=>{
       if(disposed||dialog!==select('#owner-modal'))return;
-      stopCamera();if(!saveBusy)modalCustomer=null;
+      stopCamera();if(!saveBusy){modalCustomer=null;clearRewardReview();}
     });
   }
   function showError(message){const el=select('[data-ow-error]');if(el){el.textContent=message;el.hidden=!message;}}
@@ -61,7 +62,9 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
   }
   function summaryMarkup(value){
     const bingo=getBingoStatus(value.stamps),name=ownerCustomerName(value),total=bingo.total||BOARD_CELLS.length;
-    const rewardLabel=value.redeemed?`${value.redeemedDiscount?`${value.redeemedDiscount}% reward`:'Card reward'} redeemed · one reward per card`:bingo.blackout?'Blackout! 25% discount available':bingo.hasBingo?'Bingo! 10% discount available':'Complete a line for 10% or the full card for 25%.';
+    const rewards=getRewardStatus(value),available=rewards.availableRewards.map(reward=>`${reward.discount}%`).join(' and ');
+    const availability=available?`${available} available`:rewards.legacyUnknown?'Previous reward recorded':rewards.count>=2?'Both discounts used':'No discount currently available';
+    const rewardLabel=`${availability} · ${rewards.count} ${rewards.count===1?'discount used':'discounts used'}`;
     return `<div class="ow-customer-summary"><div class="ow-customer-top"><div class="ow-customer-avatar">${ownerEscape(name.charAt(0).toUpperCase())}</div><div><div class="ow-kicker">LAST BINGO</div><h3>${ownerEscape(name)}</h3><span>${bingo.count} of ${total} purchase stamps</span></div><span class="ow-verified">${ownerIcon('check')}Updated</span></div><div class="ow-mini-stamps ow-bingo-summary">${BOARD_CELLS.map(c=>`<div class="${value.stamps?.[c.id]?'is-collected':''}" title="${ownerEscape(c.name)}: ${value.stamps?.[c.id]?'collected':'waiting'}">${ownerIcon(c.icon)}<span>${ownerEscape(c.name)}</span>${value.stamps?.[c.id]?'<b aria-label="Collected">✓</b>':''}</div>`).join('')}</div><div class="ow-summary-bottom"><span>${ownerEscape(rewardLabel)}</span><button class="ow-quiet" data-ow-action="review">Review bingo ${ownerIcon('arrow')}</button></div></div>`;
   }
   function searchMarkup(){
@@ -192,26 +195,45 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
   }
   function correctionMarkup(value){
     const locked=Boolean(pendingCorrection);
-    return `<div class="ow-correction-banner"><div><b>Correct a mistake</b><p>Untick any saved stamps added by mistake. Nothing changes until you confirm.</p></div><button class="ow-quiet" data-ow-action="purchase-mode" ${locked?'disabled':''}>Back to purchases</button></div><form data-ow-form="corrections">${categoryGridMarkup(value,{correction:true,locked})}<p class="ow-modal-error" data-ow-correction-error role="alert" ${locked?'':'hidden'}>${locked?'This correction has an unconfirmed save. Retry to check the same removal without affecting any later stamps.':''}</p><button class="ow-primary ow-full ow-remove-button" type="submit" data-ow-remove ${locked?'':'disabled'}>${locked?'Retry removal':'Remove stamps'} ${ownerIcon('close')}</button><section class="ow-correction-confirm" data-ow-correction-confirm hidden><h3>Remove mistaken stamps?</h3><p><span data-ow-removal-count></span> The customer will see this update and discount eligibility will be recalculated. A reward already redeemed stays used.</p><div><button class="ow-quiet" type="button" data-ow-action="cancel-removal">Keep editing</button><button class="ow-primary" type="button" data-ow-action="confirm-removal">Confirm removal ${ownerIcon('check')}</button></div></section><button class="ow-secondary ow-full" type="button" data-ow-action="reload-bingo" hidden>Reload bingo ${ownerIcon('arrow')}</button><p class="ow-save-note">Only saved stamps can be removed here. Purchases and reward redemption history are kept.</p></form>`;
+    return `<div class="ow-correction-banner"><div><b>Correct a mistake</b><p>Untick any saved stamps added by mistake. Nothing changes until you confirm.</p></div><button class="ow-quiet" data-ow-action="purchase-mode" ${locked?'disabled':''}>Back to purchases</button></div><form data-ow-form="corrections">${categoryGridMarkup(value,{correction:true,locked})}<p class="ow-modal-error" data-ow-correction-error role="alert" ${locked?'':'hidden'}>${locked?'This correction has an unconfirmed save. Retry to check the same removal without affecting any later stamps.':''}</p><button class="ow-primary ow-full ow-remove-button" type="submit" data-ow-remove ${locked?'':'disabled'}>${locked?'Retry removal':'Remove stamps'} ${ownerIcon('close')}</button><section class="ow-correction-confirm" data-ow-correction-confirm hidden><h3>Remove mistaken stamps?</h3><p><span data-ow-removal-count></span> The customer will see this update and discount eligibility will be recalculated. Previously used discounts stay used.</p><div><button class="ow-quiet" type="button" data-ow-action="cancel-removal">Keep editing</button><button class="ow-primary" type="button" data-ow-action="confirm-removal">Confirm removal ${ownerIcon('check')}</button></div></section><button class="ow-secondary ow-full" type="button" data-ow-action="reload-bingo" hidden>Reload bingo ${ownerIcon('arrow')}</button><p class="ow-save-note">Only saved stamps can be removed here. Purchases and reward redemption history are kept.</p></form>`;
   }
   function modalMarkup(value,notice=''){
     const bingo=getBingoStatus(value.stamps),name=ownerCustomerName(value),total=bingo.total||BOARD_CELLS.length;
-    const locked=Boolean(pendingVisit);
-    const normal=`<div class="ow-mode-bar"><span>Verify this purchase</span><button class="ow-quiet" data-ow-action="correct-stamps" ${locked||!bingo.count?'disabled':''}>Correct stamps</button></div><p class="ow-modal-intro">Select every category in this purchase. Green stamps are already saved.</p><p class="ow-stamp-key"><span>Green = saved</span><span>Red = selected for this purchase</span></p><form data-ow-form="stamps">${categoryGridMarkup(value,{locked})}${bingo.count?`<div class="ow-correction-shortcut"><p>Need to undo a green stamp?</p><button type="button" class="ow-secondary" data-ow-action="correct-stamps" ${locked?'disabled':''}>Correct saved stamps</button></div>`:''}<label class="ow-direct-option"><input type="checkbox" name="directOrder" ${pendingVisit?.directOrder?'checked':''} ${locked?'disabled':''}>${ownerIcon('bag')}<span><b>They ordered directly with Umami</b><small>Add a direct-order badge for this visit.</small></span></label><p class="ow-modal-error" data-ow-save-error role="alert" ${locked?'':'hidden'}>${locked?'This visit has an unconfirmed save. Retry to check the same purchase without adding it twice.':''}</p><button class="ow-primary ow-full" type="submit" data-ow-confirm ${locked?'':'disabled'}>${locked?'Retry confirmation':'Okay, add stamps'} ${ownerIcon('check')}</button><p class="ow-save-note">${bingo.blackout?`All ${total} purchase categories are collected. Their card is a blackout.`:'Only select categories from a purchase you have checked.'}</p></form>${rewardMarkup(value,bingo)}`;
+    const purchaseRetry=Boolean(pendingVisit),rewardLocked=Boolean(pendingRedemption||selectedRewardId||redemptionNeedsReload);
+    const locked=purchaseRetry||rewardLocked||saveBusy;
+    const normal=`<div class="ow-mode-bar"><span>Verify this purchase</span><button class="ow-quiet" data-ow-action="correct-stamps" ${locked||!bingo.count?'disabled':''}>Correct stamps</button></div><p class="ow-modal-intro">Select every category in this purchase. Green stamps are already saved.</p><p class="ow-stamp-key"><span>Green = saved</span><span>Red = selected for this purchase</span></p><form data-ow-form="stamps">${categoryGridMarkup(value,{locked})}${bingo.count?`<div class="ow-correction-shortcut"><p>Need to undo a green stamp?</p><button type="button" class="ow-secondary" data-ow-action="correct-stamps" ${locked?'disabled':''}>Correct saved stamps</button></div>`:''}<label class="ow-direct-option"><input type="checkbox" name="directOrder" ${pendingVisit?.directOrder?'checked':''} ${locked?'disabled':''}>${ownerIcon('bag')}<span><b>They ordered directly with Umami</b><small>Add a direct-order badge for this visit.</small></span></label><p class="ow-modal-error" data-ow-save-error role="alert" ${purchaseRetry?'':'hidden'}>${purchaseRetry?'This visit has an unconfirmed save. Retry to check the same purchase without adding it twice.':''}</p><button class="ow-primary ow-full" type="submit" data-ow-confirm ${purchaseRetry&&!rewardLocked&&!saveBusy?'':'disabled'}>${purchaseRetry?'Retry confirmation':'Okay, add stamps'} ${ownerIcon('check')}</button><p class="ow-save-note">${bingo.blackout?`All ${total} purchase categories are collected. Their card is a blackout.`:'Only select categories from a purchase you have checked.'}</p></form>${rewardMarkup(value,bingo)}`;
     return `<div class="ow-modal-header"><div class="ow-kicker">${correctionMode?'CHECK THE SAVED STAMPS':'VERIFY THE PURCHASE'}</div><button class="ow-modal-close" data-ow-action="close-modal" aria-label="Close bingo">${ownerIcon('close')}</button></div><h2 id="ow-modal-title">${correctionMode?'Correct their bingo.':'What did they get?'}</h2><div class="ow-modal-person"><span class="ow-customer-avatar">${ownerEscape(name.charAt(0).toUpperCase())}</span><div><b>${ownerEscape(name)}</b>${value.email?`<small class="ow-modal-email">${ownerEscape(value.email)}</small>`:''}<span>${bingo.count} of ${total} purchase stamps · ${ownerEscape(value.code.slice(0,4))}…${ownerEscape(value.code.slice(-4))}</span></div></div>${notice?`<p class="ow-correction-success" role="status">${ownerEscape(notice)}</p>`:''}${correctionMode?correctionMarkup(value):normal}`;
   }
-  function rewardMarkup(value,bingo){
-    if(!bingo.hasBingo&&!value.redeemed)return '<p class="ow-bingo-terms">Any horizontal, vertical or diagonal line earns 10%. A full card earns 25%. One reward per card; discounts cannot be combined.</p>';
-    const redeemed=value.redeemed,discount=bingo.discount;
-    const title=redeemed?`${value.redeemedDiscount?`${value.redeemedDiscount}% reward`:'Card reward'} already redeemed`:bingo.blackout?'Blackout! 25% discount unlocked':'Bingo! 10% discount unlocked';
-    return `<section class="ow-redeem-box">${ownerIcon('gift')}<div><b>${ownerEscape(title)}</b><p>${redeemed?'This card’s one reward has been used. Further stamps do not unlock another discount.':bingo.blackout?`All ${bingo.total||BOARD_CELLS.length} purchase stamps collected.`:'A complete horizontal, vertical or diagonal line.'}</p></div>${!redeemed?`<button class="ow-secondary" data-ow-action="redeem" ${pendingVisit?'disabled':''}>Use ${discount}% reward</button><div class="ow-redemption-confirm" data-ow-redeem-confirm hidden><h3>Use their one reward now?</h3><p>${discount===10?'Redeeming 10% uses this card’s only reward. They can keep collecting instead to reach a full card worth 25%.':'Confirm the 25% discount on this purchase. This uses the card’s only reward.'} This discount cannot be combined with another offer.</p><div><button class="ow-quiet" data-ow-action="cancel-redeem">${discount===10?'Keep collecting':'Cancel'}</button><button class="ow-primary" data-ow-action="confirm-redeem">Confirm ${discount}% discount ${ownerIcon('check')}</button></div></div>`:''}</section>`;
+  function rewardMarkup(value){
+    const rewards=getRewardStatus(value),selected=rewards.availableRewards.find(reward=>reward.id===selectedRewardId);
+    const pending=pendingRedemption,discount=pending?.rewardId==='blackout'?25:pending?10:selected?.discount;
+    const blocked=Boolean(saveBusy||pendingVisit||pendingCorrection||pending||selectedRewardId||redemptionNeedsReload||rewardUsedThisReview);
+    const choices=rewards.availableRewards.map(reward=>`<div class="ow-reward-choice"><div><b>${reward.discount}% discount</b><span>${ownerEscape(reward.label)}</span></div><button type="button" class="ow-secondary" data-ow-action="redeem" data-ow-reward-id="${reward.id}" ${blocked?'disabled':''}>Use ${reward.discount}% discount</button></div>`).join('');
+    const history=rewards.usedRewards.map(reward=>`<li><span>${reward.discount===10||reward.discount===25?`${reward.discount}% discount used`:ownerEscape(reward.label)}</span>${reward.date&&!Number.isNaN(Date.parse(reward.date))?`<time datetime="${ownerEscape(reward.date)}">${ownerEscape(new Date(reward.date).toLocaleDateString())}</time>`:''}</li>`).join('');
+    let confirmation='';
+    if(pending){
+      confirmation=`<div class="ow-reward-confirm" data-ow-redeem-confirm><h3>Confirm the same ${discount}% discount.</h3><p>${ownerEscape(redemptionError||'This discount has an unconfirmed save. Retry to check its result without using another discount.')}</p><button type="button" class="ow-primary" data-ow-action="confirm-redeem" ${saveBusy?'disabled':''}>${saveBusy?'Confirming…':`Retry ${discount}% discount`}</button></div>`;
+    }else if(selected){
+      const otherUsed=rewards.usedRewards.some(reward=>reward.id===(selected.id==='first-line'?'blackout':'first-line'));
+      const next=selected.id==='first-line'?(otherUsed?'Their full-card discount has already been used.':'The 25% full-card discount stays available once all categories are stamped.'):otherUsed?'Their first-line discount has already been used.':'Their 10% first-line discount stays available for a separate purchase.';
+      confirmation=`<div class="ow-reward-confirm" data-ow-redeem-confirm><h3>Use ${selected.discount}% discount now?</h3><p>Confirm this discount for the purchase you have checked. Use one discount per purchase; discounts cannot be combined. ${next}</p><div><button type="button" class="ow-quiet" data-ow-action="cancel-redeem">Cancel</button><button type="button" class="ow-primary" data-ow-action="confirm-redeem">Confirm ${selected.discount}% discount ${ownerIcon('check')}</button></div></div>`;
+    }
+    return `<section class="ow-rewards" aria-label="Card discounts"><h3>Discounts for this card.</h3><p class="ow-reward-terms">10% once for the first completed line, plus 25% once for the full card. Use one discount per purchase; discounts cannot be combined.</p>${choices||`<p class="ow-reward-note">${rewards.usedRewards.length?'No unused discount is available right now.':'Complete a horizontal, vertical or diagonal line to unlock the first discount.'}</p>`}${rewardUsedThisReview?'<p class="ow-reward-note" role="status">Discount recorded for this purchase. Close this card and reopen it when checking a separate purchase to use another available discount.</p>':''}${confirmation}${redemptionNeedsReload?`<div class="ow-reward-confirm" role="alert"><p>${ownerEscape(redemptionError||'Reload this card and review its discounts before continuing.')}</p><button type="button" class="ow-secondary" data-ow-action="reload-rewards" ${saveBusy?'disabled':''}>Reload discounts</button></div>`:''}${history?`<div class="ow-reward-history"><h4>Used discounts · ${rewards.count}</h4><ul aria-label="Redeemed discounts">${history}</ul></div>`:''}${rewards.legacyUnknown?'<p class="ow-reward-note">A previous reward was used before its percentage was recorded. Its history is preserved; no further discount is automatically available on this card.</p>':''}</section>`;
   }
-  function openCustomer(value,{correction=false,notice=''}={}){
-    stopCamera();modalCustomer=value;correctionStale=false;
+  function clearRewardReview(){
+    pendingRedemption=null;selectedRewardId=null;redemptionNeedsReload=false;redemptionError='';rewardUsedThisReview=false;
+  }
+  function renderCustomerModal(notice=''){
+    if(modalCustomer)select('[data-ow-modal-content]').innerHTML=modalMarkup(modalCustomer,notice);
+  }
+  function openCustomer(value,{correction=false,notice='',redeemedThisReview=rewardUsedThisReview&&modalCustomer?.code===value.code}={}){
+    stopCamera();modalCustomer=value;correctionStale=false;clearRewardReview();
     pendingVisit=pendingVisits.get(value.code)||null;
     pendingCorrection=pendingCorrections.get(value.code)||null;
-    correctionMode=!pendingVisit&&(correction||Boolean(pendingCorrection));
-    select('[data-ow-modal-content]').innerHTML=modalMarkup(value,notice);
+    pendingRedemption=pendingRedemptions.get(value.code)||null;
+    rewardUsedThisReview=redeemedThisReview;
+    correctionMode=!pendingVisit&&!pendingRedemption&&(correction||Boolean(pendingCorrection));
+    renderCustomerModal(notice);
     const dialog=select('#owner-modal');if(!dialog.open)dialog.showModal();
   }
   function updateSelection(){
@@ -223,12 +245,12 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
       select('[data-ow-form="corrections"]').querySelectorAll('label.is-collected').forEach(label=>{label.querySelector('[data-ow-category-note]').textContent=label.querySelector('input').checked?'Saved stamp':'Will be removed';});
       return;
     }
-    if(pendingVisit||saveBusy)return;
+    if(pendingVisit||pendingRedemption||selectedRewardId||redemptionNeedsReload||saveBusy)return;
     const count=select('[data-ow-form="stamps"]')?.querySelectorAll('input[name="categories"]:checked').length||0;
     const button=select('[data-ow-confirm]');if(button){button.disabled=count===0;button.innerHTML=`${count?`Okay, add ${count} ${count===1?'stamp':'stamps'}`:'Okay, add stamps'} ${ownerIcon('check')}`;}
   }
   async function saveStamps(form){
-    if(saveBusy||!modalCustomer||correctionMode||pendingCorrection)return;
+    if(saveBusy||!modalCustomer||correctionMode||pendingCorrection||pendingRedemption||selectedRewardId||redemptionNeedsReload)return;
     if(!pendingVisit){
       const fields=new FormData(form),categories=fields.getAll('categories');
       if(!categories.length)return;
@@ -239,7 +261,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
     const button=select('[data-ow-confirm]');button.disabled=true;button.textContent='Adding discoveries…';
     form.querySelectorAll('fieldset,input').forEach(el=>el.disabled=true);
     container.querySelectorAll('[data-ow-action="correct-stamps"]').forEach(button=>button.disabled=true);
-    const reward=select('[data-ow-action="redeem"]');if(reward)reward.disabled=true;
+    container.querySelectorAll('[data-ow-action="redeem"]').forEach(button=>button.disabled=true);
     const errorEl=select('[data-ow-save-error]');errorEl.hidden=true;
     try{
       const result=await api('/api/owner/stamps',{method:'POST',body:payload});
@@ -264,7 +286,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
     return BOARD_CELLS.filter(category=>modalCustomer.stamps?.[category.id]&&!form.querySelector(`input[value="${category.id}"]`).checked).map(category=>category.id);
   }
   function enterCorrection(){
-    if(saveBusy||pendingVisit||!modalCustomer||!getBingoStatus(modalCustomer.stamps).count)return;
+    if(saveBusy||pendingVisit||pendingRedemption||selectedRewardId||redemptionNeedsReload||!modalCustomer||!getBingoStatus(modalCustomer.stamps).count)return;
     if(select('[data-ow-form="stamps"] input[name="categories"]:checked')){
       const error=select('[data-ow-save-error]');error.textContent='Untick the red purchase selections or confirm them first. Then choose Correct stamps to remove a saved green stamp.';error.hidden=false;error.tabIndex=-1;error.focus();
       return;
@@ -272,7 +294,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
     openCustomer(modalCustomer,{correction:true});
   }
   function showCorrectionConfirm(){
-    if(saveBusy||correctionStale||!correctionMode||!modalCustomer||pendingVisit)return;
+    if(saveBusy||correctionStale||!correctionMode||!modalCustomer||pendingVisit||pendingRedemption)return;
     if(pendingCorrection){saveCorrection();return;}
     const categories=correctionCategories();if(!categories.length)return;
     select('[data-ow-removal-count]').textContent=`${categories.length} saved ${categories.length===1?'stamp will':'stamps will'} be removed.`;
@@ -287,7 +309,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
     select('[data-ow-remove]')?.focus();
   }
   async function saveCorrection(){
-    if(saveBusy||correctionStale||!correctionMode||!modalCustomer||pendingVisit)return;
+    if(saveBusy||correctionStale||!correctionMode||!modalCustomer||pendingVisit||pendingRedemption)return;
     if(!pendingCorrection){
       const categories=correctionCategories();if(!categories.length)return;
       pendingCorrection={code:modalCustomer.code,categories,requestId:createRequestId(),expectedStamps:Object.fromEntries(categories.map(id=>[id,modalCustomer.stamps[id]]))};
@@ -337,31 +359,70 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
       if(!disposed){const error=select('[data-ow-correction-error]');error.textContent=errorText(failure);error.hidden=false;button.disabled=false;button.textContent='Reload bingo';}
     }finally{lookupBusy=false;}
   }
-  function showRedemption(){
-    if(saveBusy||pendingVisit||pendingCorrection||correctionMode||!modalCustomer||modalCustomer.redeemed||!getBingoStatus(modalCustomer.stamps).hasBingo)return;
+  function showRedemption(rewardId){
+    if(saveBusy||pendingVisit||pendingCorrection||pendingRedemption||redemptionNeedsReload||rewardUsedThisReview||correctionMode||!modalCustomer)return;
+    if(!getRewardStatus(modalCustomer).availableRewards.some(reward=>reward.id===rewardId))return;
     if(select('[data-ow-form="stamps"] input[name="categories"]:checked')){
-      const error=select('[data-ow-save-error]');error.textContent='Confirm the selected purchase stamps first, then review this bingo to use its reward.';error.hidden=false;
-      return;
+      const error=select('[data-ow-save-error]');error.textContent='Confirm the selected purchase stamps first, then review this bingo to use a discount.';error.hidden=false;return;
     }
-    const prompt=select('[data-ow-redeem-confirm]');if(!prompt)return;
-    prompt.hidden=false;select('[data-ow-action="redeem"]').hidden=true;
-    prompt.querySelector('[data-ow-action="cancel-redeem"]')?.focus();
+    selectedRewardId=rewardId;renderCustomerModal();
+    select('[data-ow-action="cancel-redeem"]')?.focus();
   }
   function cancelRedemption(){
-    if(saveBusy)return;
-    const prompt=select('[data-ow-redeem-confirm]');if(prompt)prompt.hidden=true;
-    const button=select('[data-ow-action="redeem"]');if(button){button.hidden=false;button.focus();}
+    if(saveBusy||pendingRedemption)return;
+    const rewardId=selectedRewardId;selectedRewardId=null;renderCustomerModal();
+    select(`[data-ow-reward-id="${rewardId}"]`)?.focus();
+  }
+  async function reloadRewardState(notice='Bingo reloaded. Review the available and used discounts.'){
+    if(saveBusy||!modalCustomer||pendingRedemption)return;
+    const code=modalCustomer.code,dialog=select('#owner-modal');
+    saveBusy=true;redemptionNeedsReload=true;renderCustomerModal();
+    try{
+      const result=await api(`/api/owner/customer?code=${encodeURIComponent(code)}`);
+      if(disposed||!dialog.open||modalCustomer?.code!==code)return;
+      customer=result.customer;select('[data-ow-last]').innerHTML=summaryMarkup(customer);
+      saveBusy=false;openCustomer(customer,{notice});
+    }catch(failure){
+      if(disposed||!dialog.open||modalCustomer?.code!==code)return;
+      if(failure?.status===401){modalCustomer=null;clearRewardReview();showAuth();showError('Please sign in again to review discounts.');return;}
+      redemptionError=`${errorText(failure)} Reload the card before continuing.`;
+    }finally{
+      saveBusy=false;
+      if(!disposed&&dialog.open&&modalCustomer?.code===code&&redemptionNeedsReload)renderCustomerModal();
+    }
   }
   async function redeem(){
-    if(saveBusy||pendingVisit||pendingCorrection||correctionMode||!modalCustomer||modalCustomer.redeemed||!getBingoStatus(modalCustomer.stamps).hasBingo)return;
-    const current=modalCustomer;saveBusy=true;
-    const button=select('[data-ow-action="confirm-redeem"]'),discount=getBingoStatus(current.stamps).discount;button.disabled=true;button.textContent='Confirming…';
+    if(saveBusy||pendingVisit||pendingCorrection||redemptionNeedsReload||rewardUsedThisReview||correctionMode||!modalCustomer)return;
+    if(!pendingRedemption){
+      if(!getRewardStatus(modalCustomer).availableRewards.some(reward=>reward.id===selectedRewardId))return;
+      pendingRedemption={code:modalCustomer.code,rewardId:selectedRewardId,requestId:createRequestId()};
+      pendingRedemptions.set(modalCustomer.code,pendingRedemption);
+    }
+    const payload=pendingRedemption,discount=payload.rewardId==='blackout'?25:10;
+    saveBusy=true;redemptionError='';renderCustomerModal();
     try{
-      const result=await api('/api/owner/redeem',{method:'POST',body:{code:current.code}});
+      const result=await api('/api/owner/redeem',{method:'POST',body:payload});
+      pendingRedemptions.delete(payload.code);pendingRedemption=null;
       if(disposed)return;
-      customer=result.customer;openCustomer(customer);toast(`${customer.redeemedDiscount||discount}% discount marked as redeemed.`);
-    }catch(error){if(!disposed){const el=select('[data-ow-save-error]');el.textContent=errorText(error);el.hidden=false;button.disabled=false;button.textContent=`Confirm ${discount}% discount`;}}
-    finally{saveBusy=false;}
+      customer=result.customer;saveBusy=false;
+      select('[data-ow-last]').innerHTML=summaryMarkup(customer);
+      openCustomer(customer,{notice:`${result.redemption?.discount||discount}% discount recorded for this purchase. Other unused discounts are kept for a separate purchase.`,redeemedThisReview:true});
+      toast(`${result.redemption?.discount||discount}% discount marked as used.`);
+    }catch(failure){
+      if(disposed)return;
+      if([400,401,409,410].includes(failure?.status)){
+        pendingRedemptions.delete(payload.code);pendingRedemption=null;selectedRewardId=null;
+        if(failure.status===401){modalCustomer=null;clearRewardReview();showAuth();showError('Please sign in again to review this discount.');return;}
+        redemptionNeedsReload=true;redemptionError=`${errorText(failure)} Reload this card and review its discounts before continuing.`;
+        saveBusy=false;
+        if(failure.status===409){await reloadRewardState('This discount changed before confirmation. Review the refreshed available and used discounts.');return;}
+      }else{
+        redemptionError=`${errorText(failure)} Retry this same ${discount}% discount to confirm its result before taking another action.`;
+      }
+    }finally{
+      saveBusy=false;
+      if(!disposed&&modalCustomer?.code===payload.code&&(pendingRedemption||redemptionNeedsReload))renderCustomerModal();
+    }
   }
   async function startCamera(){
     if(disposed||!authenticated||document.hidden||cameraStarting||scanner||lookupBusy||select('#owner-modal')?.open)return;
@@ -386,7 +447,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
     }
   }
   function onDialogCancel(event){if(saveBusy)event.preventDefault();else stopCamera();}
-  function closeCustomer(){if(saveBusy)return;select('#owner-modal')?.close();modalCustomer=null;pendingVisit=null;pendingCorrection=null;correctionMode=false;correctionStale=false;}
+  function closeCustomer(){if(saveBusy)return;select('#owner-modal')?.close();modalCustomer=null;pendingVisit=null;pendingCorrection=null;correctionMode=false;correctionStale=false;clearRewardReview();}
   async function onClick(event){
     const button=event.target.closest('[data-ow-action]');if(!button||!container.contains(button))return;
     event.preventDefault();
@@ -410,9 +471,10 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
       case'cancel-removal':cancelCorrectionConfirm();break;
       case'confirm-removal':saveCorrection();break;
       case'reload-bingo':reloadCorrection();break;
-      case'redeem':showRedemption();break;
+      case'redeem':showRedemption(button.dataset.owRewardId);break;
       case'cancel-redeem':cancelRedemption();break;
       case'confirm-redeem':redeem();break;
+      case'reload-rewards':reloadRewardState();break;
       case'retry-owner':initializeOwner();break;
     }
   }

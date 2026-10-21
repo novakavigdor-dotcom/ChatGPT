@@ -27,22 +27,84 @@ export function getBingoStatus(stamps={}) {
   const count=CATEGORIES.filter(cell=>stamps?.[cell.id]).length,total=CATEGORIES.length,blackout=count===total;
   return {completedLines,hasBingo:completedLines.length>0,blackout,discount:blackout?25:completedLines.length?10:0,count,total};
 }
-export function emptyPassport(){return {version:3,firstName:'',lastName:'',email:'',name:'',needsProfile:true,stamps:{},orders:[],redeemed:false,redeemedDiscount:0};}
+export const BINGO_REWARDS = [
+  {id:'first-line',discount:10,label:'First bingo line'},
+  {id:'blackout',discount:25,label:'Full bingo card'},
+];
+const rewardDefinition=id=>BINGO_REWARDS.find(reward=>reward.id===id);
+const validDate=value=>typeof value==='string'&&!Number.isNaN(Date.parse(value));
+const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+// The old card stored only one redeemed flag and an optional percentage. Convert
+// that history once, without pretending an unknown historical percentage was 10%.
+// Nonempty recorded history wins over compatibility fields on newer cards.
+// An empty array plus a used flag can come from an old in-flight server request.
+export function getRedemptions(value){
+  if(!value||typeof value!=='object')return [];
+  if(!Array.isArray(value.redemptions)||(value.redemptions.length===0&&value.redeemed===true)){
+    if(value.redeemed!==true)return [];
+    const discount=[10,25].includes(value.redeemedDiscount)?value.redeemedDiscount:null;
+    const rewardId=discount===10?'first-line':discount===25?'blackout':'legacy-unknown';
+    return [{id:`legacy-${rewardId==='legacy-unknown'?'unknown':rewardId}`,rewardId,discount,date:validDate(value.redeemedAt)?value.redeemedAt:null,actor:'owner',legacy:true}];
+  }
+  const result=[],usedIds=new Set(),usedRewards=new Set();
+  for(const entry of value.redemptions){
+    if(!entry||typeof entry!=='object'||typeof entry.id!=='string'||!entry.id||entry.id.length>128||/[\u0000-\u001f\u007f]/.test(entry.id))continue;
+    const definition=rewardDefinition(entry.rewardId),unknown=entry.rewardId==='legacy-unknown'&&entry.discount===null;
+    if((!definition&&!unknown)||(definition&&entry.discount!==definition.discount))continue;
+    const legacy=entry.legacy===true||unknown;
+    if(!validDate(entry.date)&&!(legacy&&entry.date===null))continue;
+    const id=uuid.test(entry.id)?entry.id.toLowerCase():entry.id;
+    if(usedIds.has(id)||usedRewards.has(entry.rewardId))continue;
+    usedIds.add(id);usedRewards.add(entry.rewardId);
+    result.push({id,rewardId:entry.rewardId,discount:unknown?null:definition.discount,date:entry.date,actor:'owner',...(legacy?{legacy:true}:{})});
+  }
+  if(!result.length&&value.redeemed===true)return getRedemptions({...value,redemptions:undefined});
+  return result;
+}
+
+export function getRewardStatus(value){
+  const redemptions=getRedemptions(value),bingo=getBingoStatus(value?.stamps);
+  const legacyUnknown=redemptions.some(entry=>entry.rewardId==='legacy-unknown');
+  const claimed=new Set(redemptions.map(entry=>entry.rewardId));
+  const availableRewards=legacyUnknown?[]:BINGO_REWARDS.filter(reward=>!claimed.has(reward.id)&&(reward.id==='first-line'?bingo.hasBingo:bingo.blackout)).map(reward=>({...reward}));
+  const usedRewards=redemptions.map(entry=>({id:entry.rewardId,discount:entry.discount,label:rewardDefinition(entry.rewardId)?.label||'Previously redeemed reward',date:entry.date,redemptionId:entry.id,...(entry.legacy?{legacy:true}:{})}));
+  return {availableRewards,usedRewards,redemptions,legacyUnknown,count:redemptions.length};
+}
+
+export function emptyPassport(){return {version:3,firstName:'',lastName:'',email:'',name:'',needsProfile:true,stamps:{},orders:[],redemptions:[],redeemed:false,redeemedDiscount:0};}
 export function normalizePassport(value){
   const clean=emptyPassport();if(!value||typeof value!=='object')return clean;
   for(const key of ['firstName','lastName'])if(typeof value[key]==='string')clean[key]=value[key].slice(0,60);
   if(typeof value.email==='string')clean.email=value.email.slice(0,254);
   clean.name=[clean.firstName,clean.lastName].filter(Boolean).join(' ')||(typeof value.name==='string'?value.name.slice(0,121):'');
   clean.needsProfile=value.needsProfile===true||!(clean.firstName&&clean.lastName&&clean.email);
-  for(const category of CATEGORIES){const date=value.stamps?.[category.id];if(typeof date==='string'&&!Number.isNaN(Date.parse(date)))clean.stamps[category.id]=date;}
+  for(const category of CATEGORIES){const date=value.stamps?.[category.id];if(validDate(date))clean.stamps[category.id]=date;}
   clean.orders=Array.isArray(value.orders)?value.orders.filter(order=>order&&typeof order.id==='string'&&typeof order.date==='string').slice(0,50).map(order=>({id:order.id,date:order.date})):[];
-  clean.redeemed=value.redeemed===true;
-  clean.redeemedDiscount=clean.redeemed?([10,25].includes(value.redeemedDiscount)?value.redeemedDiscount:null):0;
+  clean.redemptions=getRedemptions(value);
+  clean.redeemed=clean.redemptions.length>0||value.redeemed===true;
+  const latest=clean.redemptions.at(-1);
+  clean.redeemedDiscount=clean.redeemed?(latest?latest.discount:[10,25].includes(value.redeemedDiscount)?value.redeemedDiscount:null):0;
   return clean;
 }
-export function redeemReward(value){
-  const next=normalizePassport(value),status=getBingoStatus(next.stamps);
-  if(next.redeemed)throw new Error('The one reward for this card has already been used.');
-  if(!status.discount)throw new Error('Complete a horizontal, vertical or diagonal line of four first.');
-  next.redeemed=true;next.redeemedDiscount=status.discount;return next;
+
+// Explicit reward and operation identities prevent a retried confirmation from
+// silently consuming the other reward after its first response was lost.
+export function redeemReward(value,rewardId,{requestId,date=new Date().toISOString()}={}){
+  if(!rewardDefinition(rewardId))throw new Error('Choose which reward to redeem.');
+  if(typeof requestId!=='string'||!uuid.test(requestId))throw new Error('A valid request ID is required to redeem a reward.');
+  const id=requestId.toLowerCase(),next=normalizePassport(value);
+  const previous=next.redemptions.find(entry=>entry.id===id);
+  if(previous){
+    if(previous.rewardId!==rewardId)throw new Error('This request ID was already used for a different reward.');
+    return next;
+  }
+  const rewards=getRewardStatus(next);
+  if(rewards.legacyUnknown||rewards.usedRewards.some(reward=>reward.id===rewardId))throw new Error('This reward has already been used.');
+  const reward=rewards.availableRewards.find(entry=>entry.id===rewardId);
+  if(!reward)throw new Error(rewardId==='blackout'?'Complete all sixteen food squares first.':'Complete a horizontal, vertical or diagonal line of four first.');
+  if(!validDate(date))throw new Error('A valid redemption date is required.');
+  next.redemptions.push({id,rewardId,discount:reward.discount,date,actor:'owner'});
+  next.redeemed=true;next.redeemedDiscount=reward.discount;
+  return next;
 }

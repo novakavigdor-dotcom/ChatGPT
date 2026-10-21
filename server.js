@@ -7,7 +7,7 @@ import { randomBytes, randomUUID, createHash, scrypt, timingSafeEqual } from 'no
 import { promisify } from 'node:util';
 import { Store } from './server/store.js';
 import { OWNER_ACCESS_RECORD } from './server/owner-access.js';
-import { CATEGORIES, getBingoStatus } from './src/loyalty.js';
+import { CATEGORIES, getBingoStatus, getRedemptions, getRewardStatus } from './src/loyalty.js';
 import { requestTime, REQUEST_MAX_AGE_MS, FUTURE_SKEW_MS } from './src/request-id.js';
 
 const deriveKey = promisify(scrypt);
@@ -31,10 +31,12 @@ function normalizeCode(value) {
   return code;
 }
 function publicCustomer(customer) {
-  const { id, code, version, firstName = '', lastName = '', email = '', name, stamps, directOrders, orders, redeemed } = customer;
-  const redeemedDiscount = customer.redeemedDiscount === undefined ? (redeemed ? null : 0) : customer.redeemedDiscount;
+  const { id, code, version, firstName = '', lastName = '', email = '', name, stamps, directOrders, orders } = customer;
+  const redemptions = getRedemptions(customer);
+  const redeemed = redemptions.length > 0;
+  const redeemedDiscount = redeemed ? redemptions.at(-1).discount : 0;
   const needsProfile = !firstName || !lastName || !email;
-  return { id, code, version, firstName, lastName, email, name, needsProfile, stamps: { ...stamps }, directOrders, orders: structuredClone(orders), corrections: structuredClone(customer.corrections || []), redeemed, redeemedDiscount, bingo: getBingoStatus(stamps) };
+  return { id, code, version, firstName, lastName, email, name, needsProfile, stamps: { ...stamps }, directOrders, orders: structuredClone(orders), corrections: structuredClone(customer.corrections || []), redemptions, rewards: getRewardStatus(customer), redeemed, redeemedDiscount, bingo: getBingoStatus(stamps) };
 }
 function findCustomer(state, code) {
   const customer = Object.values(state.customers).find((entry) => entry.code === code);
@@ -69,6 +71,7 @@ function applyProfile(state, customer, profile) {
   Object.assign(customer, profile);
 }
 function migrateCustomer(customer) {
+  customer.redemptions = getRedemptions(customer);
   if (customer.redeemedDiscount === undefined) customer.redeemedDiscount = customer.redeemed ? null : 0;
   if (customer.version >= 3) return;
   // The old broad categories cannot prove which new bingo item was bought.
@@ -251,7 +254,7 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
           return { payload: { customer: publicCustomer(customer) } };
         } catch (error) { if (error.status !== 401) throw error; }
         const id = randomUUID();
-        const customer = { id, code: randomBytes(16).toString('hex').toUpperCase(), version: 3, stamps: {}, directOrders: 0, orders: [], corrections: [], redeemed: false, redeemedDiscount: 0 };
+        const customer = { id, code: randomBytes(16).toString('hex').toUpperCase(), version: 3, stamps: {}, directOrders: 0, orders: [], corrections: [], redemptions: [], redeemed: false, redeemedDiscount: 0 };
         applyProfile(state, customer, profile);
         state.customers[id] = customer;
         return { cookie: newSessionCookie(state, request, 'customer', id, secureCookies), payload: { customer: publicCustomer(customer) } };
@@ -376,14 +379,34 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
     }));
     if (route === 'POST /api/owner/redeem') return json(response, await store.transaction((state) => {
       session(state, request, 'owner');
-      const customer = findCustomer(state, normalizeCode(body.code));
-      if (customer.redeemed) fail(409, 'This customer has already redeemed the reward.');
-      const { discount } = getBingoStatus(customer.stamps);
-      if (!discount) fail(409, `Complete a bingo line for 10% off or all ${categoryIds.length} food squares for 25% off.`);
+      const code = normalizeCode(body.code);
+      if (body.rewardId === undefined) fail(409, 'Refresh this page to choose the specific reward before redeeming it.');
+      const rewardId = body.rewardId;
+      if (!['first-line', 'blackout'].includes(rewardId)) fail(400, 'Choose a valid bingo reward.');
+      const { id: requestId, previous } = requestIdentity(state, body.requestId);
+      const fingerprint = digest(JSON.stringify({ operation: 'redeem', code, rewardId }));
+      if (previous) {
+        if (previous.operation !== 'redeem' || previous.fingerprint !== fingerprint) fail(409, 'This request ID was already used for a different change.');
+        return { customer: publicCustomer(findCustomer(state, code)), redemption: structuredClone(previous.redemption), repeated: true };
+      }
+      const customer = findCustomer(state, code);
+      const rewards = getRewardStatus(customer);
+      const reward = rewards.availableRewards.find((entry) => entry.id === rewardId);
+      if (!reward) {
+        if (rewards.legacyUnknown) fail(409, 'This account has a previous reward with an unknown percentage. Its reward history needs review before another discount can be redeemed.');
+        if (rewards.usedRewards.some((entry) => entry.id === rewardId)) fail(409, 'This reward has already been redeemed. Each reward can be used once.');
+        fail(409, rewardId === 'blackout' ? `Collect all ${categoryIds.length} food stamps before using the 25% full-card reward.` : 'Complete a row, column or diagonal of four before using the 10% reward.');
+      }
+      const date = new Date().toISOString();
+      const redemption = { id: requestId, rewardId, discount: reward.discount, date, actor: 'owner' };
+      customer.redemptions = [...getRedemptions(customer), redemption];
+      // Retain the original fields for older account readers; eligibility comes
+      // from the individual permanent ledger entries, never this summary flag.
       customer.redeemed = true;
-      customer.redeemedDiscount = discount;
-      customer.redeemedAt = new Date().toISOString();
-      return { customer: publicCustomer(customer) };
+      customer.redeemedDiscount = reward.discount;
+      customer.redeemedAt = date;
+      state.requests[requestId] = { operation: 'redeem', fingerprint, redemption: { ...redemption }, date };
+      return { customer: publicCustomer(customer), redemption };
     }));
     fail(404, 'This API endpoint was not found.');
   }

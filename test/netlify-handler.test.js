@@ -7,11 +7,11 @@ import { BlobStore } from '../server/blob-store.js';
 import { createNetlifyHandler } from '../server/netlify-handler.js';
 
 function fixture({ password = '', alwaysConflict = false, ownerAccessRecord = null } = {}) {
-  let state = null, etag = 0;
+  let state = null, etag = 0, conflict = alwaysConflict;
   const blobs = {
     async getWithMetadata() { return state ? { data: structuredClone(state), etag: `"${etag}"` } : null; },
     async setJSON(key, next, condition) {
-      if (alwaysConflict || (condition.onlyIfNew ? state !== null : condition.onlyIfMatch !== `"${etag}"`)) return { modified: false };
+      if (conflict || (condition.onlyIfNew ? state !== null : condition.onlyIfMatch !== `"${etag}"`)) return { modified: false };
       state = structuredClone(next);
       return { modified: true, etag: `"${++etag}"` };
     },
@@ -27,7 +27,7 @@ function fixture({ password = '', alwaysConflict = false, ownerAccessRecord = nu
     }), { ip: '203.0.113.7' });
     return { status: response.status, value: await response.json(), headers: response.headers, cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
-  return { request };
+  return { request, failWrites: (value) => { conflict = value; } };
 }
 
 test('Netlify bridge handles API rewrites and never permits public first-owner setup', async () => {
@@ -135,4 +135,61 @@ test('Netlify returning customers use only last name and email to open their exi
   assert.equal(login.value.customer.code, signup.value.customer.code);
   assert.equal((await api.request('/api/customer', { cookie: login.cookie })).value.customer.email, signup.value.customer.email);
   assert.equal((await api.request('/api/owner/session', { cookie: login.cookie })).status, 401);
+});
+
+
+test('Netlify callers redeem the two rewards independently with atomic and idempotent confirmations', async () => {
+  const password='test-owner-password-only';
+  const api=fixture({password});
+  const signup=await api.request('/api/customer',{method:'POST',body:{firstName:'Multiple',lastName:'Rewards',email:'multiple-rewards@example.test'}});
+  const owner=await api.request('/api/owner/login',{method:'POST',body:{password}});
+  const code=signup.value.customer.code;
+  const categories=['maki','poke','gyoza','sushi-pizza','handroll','onigiri','udon','miso','nigiri','sandwich','salad','soba','senken','edamame','sashimi','platter'];
+  const stamp=(chosen)=>api.request('/api/owner/stamps',{method:'POST',cookie:owner.cookie,body:{code,categories:chosen,directOrder:false,requestId:createRequestId()}});
+  const redeem=(rewardId,requestId=createRequestId(),cookie=owner.cookie)=>api.request('/.netlify/functions/api/owner/redeem',{method:'POST',cookie,body:{code,rewardId,requestId}});
+  await stamp(categories.slice(0,4));
+  assert.equal((await redeem('first-line',createRequestId(),signup.cookie)).status,401);
+  const concurrent=await Promise.all(Array.from({length:5},()=>redeem('first-line')));
+  assert.deepEqual(concurrent.map(result=>result.status).sort(),[200,409,409,409,409]);
+  const first=concurrent.find(result=>result.status===200);
+  assert.equal(first.value.redemption.discount,10);
+  const retry=await redeem('first-line',first.value.redemption.id);
+  assert.equal(retry.status,200);
+  assert.equal(retry.value.repeated,true);
+  assert.deepEqual(retry.value.redemption,first.value.redemption);
+  const full=await stamp(categories);
+  assert.deepEqual(full.value.customer.rewards.availableRewards.map(reward=>reward.id),['blackout']);
+  const fullRequest=createRequestId();
+  const repeated=await Promise.all(Array.from({length:3},()=>redeem('blackout',fullRequest)));
+  assert.ok(repeated.every(result=>result.status===200));
+  assert.equal(repeated.filter(result=>!result.value.repeated).length,1);
+  const customer=(await api.request('/api/customer',{cookie:signup.cookie})).value.customer;
+  assert.deepEqual(customer.redemptions.map(entry=>entry.discount),[10,25]);
+  assert.deepEqual(customer.rewards.availableRewards,[]);
+  assert.equal((await redeem('blackout')).status,409);
+  const replay=await redeem('first-line',first.value.redemption.id);
+  assert.equal(replay.value.repeated,true);
+  assert.equal(replay.value.customer.redemptions.length,2);
+  assert.equal(replay.value.redemption.rewardId,'first-line');
+});
+
+test('a failed Netlify redemption commit cannot consume a reward or acknowledge a discount', async () => {
+  const password='test-owner-password-only';
+  const api=fixture({password});
+  const signup=await api.request('/api/customer',{method:'POST',body:{firstName:'Durable',lastName:'Reward',email:'durable-reward@example.test'}});
+  const owner=await api.request('/api/owner/login',{method:'POST',body:{password}});
+  const code=signup.value.customer.code;
+  await api.request('/api/owner/stamps',{method:'POST',cookie:owner.cookie,body:{code,categories:['maki','poke','gyoza','sushi-pizza'],directOrder:false,requestId:createRequestId()}});
+  const body={code,rewardId:'first-line',requestId:createRequestId()};
+  api.failWrites(true);
+  const failed=await api.request('/api/owner/redeem',{method:'POST',cookie:owner.cookie,body});
+  assert.equal(failed.status,503);
+  assert.equal(failed.value.redemption,undefined);
+  api.failWrites(false);
+  const unchanged=await api.request('/api/customer',{cookie:signup.cookie});
+  assert.deepEqual(unchanged.value.customer.redemptions,[]);
+  assert.deepEqual(unchanged.value.customer.rewards.availableRewards.map(reward=>reward.id),['first-line']);
+  const saved=await api.request('/api/owner/redeem',{method:'POST',cookie:owner.cookie,body});
+  assert.equal(saved.status,200);
+  assert.equal(saved.value.customer.redemptions.length,1);
 });
