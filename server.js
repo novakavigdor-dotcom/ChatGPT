@@ -7,7 +7,7 @@ import { randomBytes, randomUUID, createHash, scrypt, timingSafeEqual } from 'no
 import { promisify } from 'node:util';
 import { Store } from './server/store.js';
 import { OWNER_ACCESS_RECORD } from './server/owner-access.js';
-import { CATEGORIES, getBingoStatus, getRedemptions, getRewardStatus } from './src/loyalty.js';
+import { BINGO_REWARDS, CATEGORIES, getBingoStatus, getRedemptions, getRewardStatus } from './src/loyalty.js';
 import { requestTime, REQUEST_MAX_AGE_MS, FUTURE_SKEW_MS } from './src/request-id.js';
 
 const deriveKey = promisify(scrypt);
@@ -71,7 +71,20 @@ function applyProfile(state, customer, profile) {
   Object.assign(customer, profile);
 }
 function migrateCustomer(customer) {
-  customer.redemptions = getRedemptions(customer);
+  const redemptions = getRedemptions(customer);
+  // A warm older function can still record a real aggregate-line or blackout
+  // redemption after private history exists. Keep those durable UUID entries,
+  // even after their request receipts expire; exclude its synthetic fallbacks.
+  for (const entry of getRedemptions({ redemptions: customer.redemptions })) {
+    if (!['first-line', 'blackout'].includes(entry.rewardId) || entry.legacy === true) continue;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(entry.id)) continue;
+    if (typeof entry.date !== 'string' || Number.isNaN(Date.parse(entry.date))) continue;
+    if (!redemptions.some((recorded) => recorded.id === entry.id || recorded.rewardId === entry.rewardId)) redemptions.push(entry);
+  }
+  customer.redemptions = redemptions;
+  // Older warm functions may rewrite the public ledger using their old reward
+  // schema. Preserve the full permanent history in a private companion field.
+  customer.rewardHistory = structuredClone(customer.redemptions);
   if (customer.redeemedDiscount === undefined) customer.redeemedDiscount = customer.redeemed ? null : 0;
   if (customer.version >= 3) return;
   // The old broad categories cannot prove which new bingo item was bought.
@@ -254,7 +267,7 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
           return { payload: { customer: publicCustomer(customer) } };
         } catch (error) { if (error.status !== 401) throw error; }
         const id = randomUUID();
-        const customer = { id, code: randomBytes(16).toString('hex').toUpperCase(), version: 3, stamps: {}, directOrders: 0, orders: [], corrections: [], redemptions: [], redeemed: false, redeemedDiscount: 0 };
+        const customer = { id, code: randomBytes(16).toString('hex').toUpperCase(), version: 3, stamps: {}, directOrders: 0, orders: [], corrections: [], redemptions: [], rewardHistory: [], redeemed: false, redeemedDiscount: 0 };
         applyProfile(state, customer, profile);
         state.customers[id] = customer;
         return { cookie: newSessionCookie(state, request, 'customer', id, secureCookies), payload: { customer: publicCustomer(customer) } };
@@ -382,14 +395,25 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       const code = normalizeCode(body.code);
       if (body.rewardId === undefined) fail(409, 'Refresh this page to choose the specific reward before redeeming it.');
       const rewardId = body.rewardId;
-      if (!['first-line', 'blackout'].includes(rewardId)) fail(400, 'Choose a valid bingo reward.');
+      // Keep the old aggregate identity solely for replaying a saved receipt.
+      // A stale client must refresh rather than select an arbitrary new line.
+      if (rewardId !== 'first-line' && !BINGO_REWARDS.some((reward) => reward.id === rewardId)) fail(400, 'Choose a valid bingo reward.');
       const { id: requestId, previous } = requestIdentity(state, body.requestId);
       const fingerprint = digest(JSON.stringify({ operation: 'redeem', code, rewardId }));
       if (previous) {
         if (previous.operation !== 'redeem' || previous.fingerprint !== fingerprint) fail(409, 'This request ID was already used for a different change.');
         return { customer: publicCustomer(findCustomer(state, code)), redemption: structuredClone(previous.redemption), repeated: true };
       }
+      if (rewardId === 'first-line') fail(409, 'Refresh this page to choose the specific completed line before redeeming it.');
       const customer = findCustomer(state, code);
+      // The permanent ledger outlives request receipt pruning. A request UUID
+      // can never consume a second reward, including on a different customer.
+      for (const entry of Object.values(state.customers)) {
+        const recorded = getRedemptions(entry).find((redemption) => redemption.id === requestId);
+        if (!recorded) continue;
+        if (entry.id !== customer.id || recorded.rewardId !== rewardId) fail(409, 'This request ID was already used for a different change.');
+        return { customer: publicCustomer(customer), redemption: structuredClone(recorded), repeated: true };
+      }
       const rewards = getRewardStatus(customer);
       const reward = rewards.availableRewards.find((entry) => entry.id === rewardId);
       if (!reward) {
@@ -400,6 +424,7 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       const date = new Date().toISOString();
       const redemption = { id: requestId, rewardId, discount: reward.discount, date, actor: 'owner' };
       customer.redemptions = [...getRedemptions(customer), redemption];
+      customer.rewardHistory = structuredClone(customer.redemptions);
       // Retain the original fields for older account readers; eligibility comes
       // from the individual permanent ledger entries, never this summary flag.
       customer.redeemed = true;

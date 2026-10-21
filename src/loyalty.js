@@ -27,49 +27,79 @@ export function getBingoStatus(stamps={}) {
   const count=CATEGORIES.filter(cell=>stamps?.[cell.id]).length,total=CATEGORIES.length,blackout=count===total;
   return {completedLines,hasBingo:completedLines.length>0,blackout,discount:blackout?25:completedLines.length?10:0,count,total};
 }
+export const BINGO_LINE_REWARDS = [
+  ...Array.from({length:4},(_,index)=>({id:`line-row-${index+1}`,discount:10,label:`Row ${index+1}`})),
+  ...Array.from({length:4},(_,index)=>({id:`line-column-${index+1}`,discount:10,label:`Column ${index+1}`})),
+  {id:'line-diagonal-main',discount:10,label:'Main diagonal'},
+  {id:'line-diagonal-anti',discount:10,label:'Other diagonal'},
+];
 export const BINGO_REWARDS = [
-  {id:'first-line',discount:10,label:'First bingo line'},
+  ...BINGO_LINE_REWARDS,
   {id:'blackout',discount:25,label:'Full bingo card'},
 ];
-const rewardDefinition=id=>BINGO_REWARDS.find(reward=>reward.id===id);
+// Older receipts did not record which line earned their one 10% reward. Keep
+// their original identity for history and retries, but never issue this ID anew.
+const previousLineReward={id:'first-line',discount:10,label:'Previous line reward'};
+const rewardDefinition=id=>BINGO_REWARDS.find(reward=>reward.id===id)||(id===previousLineReward.id?previousLineReward:undefined);
 const validDate=value=>typeof value==='string'&&!Number.isNaN(Date.parse(value));
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-// The old card stored only one redeemed flag and an optional percentage. Convert
-// that history once, without pretending an unknown historical percentage was 10%.
-// Nonempty recorded history wins over compatibility fields on newer cards.
-// An empty array plus a used flag can come from an old in-flight server request.
-export function getRedemptions(value){
-  if(!value||typeof value!=='object')return [];
-  if(!Array.isArray(value.redemptions)||(value.redemptions.length===0&&value.redeemed===true)){
-    if(value.redeemed!==true)return [];
-    const discount=[10,25].includes(value.redeemedDiscount)?value.redeemedDiscount:null;
-    const rewardId=discount===10?'first-line':discount===25?'blackout':'legacy-unknown';
-    return [{id:`legacy-${rewardId==='legacy-unknown'?'unknown':rewardId}`,rewardId,discount,date:validDate(value.redeemedAt)?value.redeemedAt:null,actor:'owner',legacy:true}];
-  }
-  const result=[],usedIds=new Set(),usedRewards=new Set();
-  for(const entry of value.redemptions){
-    if(!entry||typeof entry!=='object'||typeof entry.id!=='string'||!entry.id||entry.id.length>128||/[\u0000-\u001f\u007f]/.test(entry.id))continue;
+function readRedemptions(entries){
+  const result=[],usedIds=new Set(),usedRewards=new Set();let invalid=false;
+  for(const entry of entries){
+    if(!entry||typeof entry!=='object'||typeof entry.id!=='string'||!entry.id||entry.id.length>128||/[\u0000-\u001f\u007f]/.test(entry.id)){invalid=true;continue;}
     const definition=rewardDefinition(entry.rewardId),unknown=entry.rewardId==='legacy-unknown'&&entry.discount===null;
-    if((!definition&&!unknown)||(definition&&entry.discount!==definition.discount))continue;
+    if((!definition&&!unknown)||(definition&&entry.discount!==definition.discount)){invalid=true;continue;}
     const legacy=entry.legacy===true||unknown;
-    if(!validDate(entry.date)&&!(legacy&&entry.date===null))continue;
+    if(!validDate(entry.date)&&!(legacy&&entry.date===null)){invalid=true;continue;}
     const id=uuid.test(entry.id)?entry.id.toLowerCase():entry.id;
     if(usedIds.has(id)||usedRewards.has(entry.rewardId))continue;
     usedIds.add(id);usedRewards.add(entry.rewardId);
     result.push({id,rewardId:entry.rewardId,discount:unknown?null:definition.discount,date:entry.date,actor:'owner',...(legacy?{legacy:true}:{})});
   }
-  if(!result.length&&value.redeemed===true)return getRedemptions({...value,redemptions:undefined});
-  return result;
+  return {result,invalid};
+}
+
+// The private history survives old in-flight functions that recognize only the
+// first-line and blackout IDs and rewrite the public redemption array. An empty
+// history still allows an old function's first-ever redemption to be migrated.
+export function getRedemptions(value){
+  if(!value||typeof value!=='object')return [];
+  if(value.rewardHistory!=null&&(!Array.isArray(value.rewardHistory)||value.rewardHistory.length>0)){
+    const {result,invalid}=Array.isArray(value.rewardHistory)?readRedemptions(value.rewardHistory):{result:[],invalid:true};
+    // A damaged private history must not silently reopen a possibly used coupon.
+    if(invalid&&!result.some(entry=>entry.rewardId==='legacy-unknown')){
+      let suffix=0,id='legacy-unknown-history';
+      while(result.some(entry=>entry.id===id))id=`legacy-unknown-history-${++suffix}`;
+      result.push({id,rewardId:'legacy-unknown',discount:null,date:null,actor:'owner',legacy:true});
+    }
+    return result;
+  }
+  const {result}=Array.isArray(value.redemptions)?readRedemptions(value.redemptions):{result:[]};
+  if(result.length||value.redeemed!==true)return result;
+  // Old cards stored only a redeemed flag and an optional percentage. Preserve
+  // an unknown percentage as generic history rather than guessing a 10% reward.
+  const discount=[10,25].includes(value.redeemedDiscount)?value.redeemedDiscount:null;
+  const rewardId=discount===10?'first-line':discount===25?'blackout':'legacy-unknown';
+  return [{id:`legacy-${rewardId==='legacy-unknown'?'unknown':rewardId}`,rewardId,discount,date:validDate(value.redeemedAt)?value.redeemedAt:null,actor:'owner',legacy:true}];
 }
 
 export function getRewardStatus(value){
   const redemptions=getRedemptions(value),bingo=getBingoStatus(value?.stamps);
   const legacyUnknown=redemptions.some(entry=>entry.rewardId==='legacy-unknown');
   const claimed=new Set(redemptions.map(entry=>entry.rewardId));
-  const availableRewards=legacyUnknown?[]:BINGO_REWARDS.filter(reward=>!claimed.has(reward.id)&&(reward.id==='first-line'?bingo.hasBingo:bingo.blackout)).map(reward=>({...reward}));
+  const completedLines=new Set(bingo.completedLines);
+  const legacyUsed=claimed.has('first-line')?1:0;
+  // Reserve one currently eligible line for the old, unidentified 10% receipt.
+  // This keeps its credit without guessing a historical line, and caps the card
+  // at ten line rewards even after corrections or later stamp additions.
+  const availableLines=legacyUnknown?[]:BINGO_LINE_REWARDS.filter((reward,index)=>!claimed.has(reward.id)&&completedLines.has(BINGO_LINES[index])).slice(legacyUsed);
+  const availableRewards=availableLines.map(reward=>({...reward}));
+  if(!legacyUnknown&&bingo.blackout&&!claimed.has('blackout'))availableRewards.push({...rewardDefinition('blackout')});
   const usedRewards=redemptions.map(entry=>({id:entry.rewardId,discount:entry.discount,label:rewardDefinition(entry.rewardId)?.label||'Previously redeemed reward',date:entry.date,redemptionId:entry.id,...(entry.legacy?{legacy:true}:{})}));
-  return {availableRewards,usedRewards,redemptions,legacyUnknown,count:redemptions.length};
+  const used=BINGO_LINE_REWARDS.filter(reward=>claimed.has(reward.id)).length+legacyUsed;
+  const lines={total:BINGO_LINE_REWARDS.length,completed:bingo.completedLines.length,available:availableLines.length,used,legacyUsed};
+  return {availableRewards,usedRewards,redemptions,legacyUnknown,count:redemptions.length,lines};
 }
 
 export function emptyPassport(){return {version:3,firstName:'',lastName:'',email:'',name:'',needsProfile:true,stamps:{},orders:[],redemptions:[],redeemed:false,redeemedDiscount:0};}
@@ -89,7 +119,7 @@ export function normalizePassport(value){
 }
 
 // Explicit reward and operation identities prevent a retried confirmation from
-// silently consuming the other reward after its first response was lost.
+// silently consuming another reward after its first response was lost.
 export function redeemReward(value,rewardId,{requestId,date=new Date().toISOString()}={}){
   if(!rewardDefinition(rewardId))throw new Error('Choose which reward to redeem.');
   if(typeof requestId!=='string'||!uuid.test(requestId))throw new Error('A valid request ID is required to redeem a reward.');
@@ -99,6 +129,7 @@ export function redeemReward(value,rewardId,{requestId,date=new Date().toISOStri
     if(previous.rewardId!==rewardId)throw new Error('This request ID was already used for a different reward.');
     return next;
   }
+  if(rewardId==='first-line')throw new Error('Choose which reward to redeem.');
   const rewards=getRewardStatus(next);
   if(rewards.legacyUnknown||rewards.usedRewards.some(reward=>reward.id===rewardId))throw new Error('This reward has already been used.');
   const reward=rewards.availableRewards.find(entry=>entry.id===rewardId);

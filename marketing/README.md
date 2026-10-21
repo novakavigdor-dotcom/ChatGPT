@@ -6,7 +6,7 @@
 - **alt-text.txt** — accessible description for the social image.
 - **poster.html** — editable poster source. It uses the restaurant's fonts and illustration asset from `../assets`.
 
-The printed QR goes to `https://umamisushipassport.netlify.app/customer`. It is a signup link, not a customer's personal code. The poster explains the two rewards on each card: one 10% discount for the first completed row, column or diagonal, plus one 25% discount for the full card. Using the 10% discount does not block the 25% reward. Each reward can be used once, on separate purchases; discounts cannot be combined.
+The printed QR goes to `https://umamisushipassport.netlify.app/customer`. It is a signup link, not a customer's personal code. The poster offers a 10% discount for each completed row, column or diagonal: four rows, four columns and two diagonals give up to ten line rewards per card. Filling all 16 squares earns a separate 25% discount. Each line and the full card earn their reward once. Use each reward on a separate purchase; discounts cannot be combined.
 
 To print from the source, open `poster.html` in Chrome or Edge, choose Letter paper, turn on background graphics, and turn off the browser's headers and footers. The supplied PDF already contains those settings.
 

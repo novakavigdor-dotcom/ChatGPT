@@ -6,10 +6,11 @@ import { join } from 'node:path';
 import { once } from 'node:events';
 import { randomUUID, randomInt, randomBytes, scryptSync, createHash } from 'node:crypto';
 import { createApp } from '../server.js';
-import { createRequestId } from '../src/request-id.js';
+import { createRequestId, REQUEST_MAX_AGE_MS } from '../src/request-id.js';
 
 const password = 'only-a-test-password';
 const categories = ['maki', 'poke', 'gyoza', 'sushi-pizza', 'handroll', 'onigiri', 'udon', 'miso', 'nigiri', 'sandwich', 'salad', 'soba', 'senken', 'edamame', 'sashimi', 'platter'];
+const lineIds = ['line-row-1', 'line-row-2', 'line-row-3', 'line-row-4', 'line-column-1', 'line-column-2', 'line-column-3', 'line-column-4', 'line-diagonal-main', 'line-diagonal-anti'];
 async function fixture(t, options = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), 'umami-api-'));
   let app;
@@ -42,7 +43,7 @@ async function fixture(t, options = {}) {
   async function stamp(cookie, code, chosen = ['maki'], extra = {}) {
     return request('/api/owner/stamps', { method: 'POST', cookie, body: { code, categories: chosen, directOrder: true, requestId: createRequestId(), ...extra } });
   }
-  async function redeem(cookie, code, rewardId = 'first-line', extra = {}) {
+  async function redeem(cookie, code, rewardId = 'line-row-1', extra = {}) {
     return request('/api/owner/redeem', { method: 'POST', cookie, body: { code, rewardId, requestId: createRequestId(), ...extra } });
   }
   return { request, customer, owner, stamp, redeem, dataDir, get store() { return app.store; }, restart: async () => { await close(); await open(); } };
@@ -135,7 +136,7 @@ test('concurrent confirmations do not lose categories or duplicate a retried vis
   assert.equal(passport.directOrders, 2);
 });
 
-test('only the owner redeems each selected reward once and both histories survive restart', async (t) => {
+test('only the owner redeems all ten distinct lines and blackout once and their histories survive restart', async (t) => {
   const app = await fixture(t);
   const customer = await app.customer('Returning guest');
   const owner = await app.owner();
@@ -148,17 +149,21 @@ test('only the owner redeems each selected reward once and both histories surviv
   assert.equal(redeemed.value.redemption.discount, 25);
   assert.equal(redeemed.value.customer.redeemed, true);
   assert.equal(redeemed.value.customer.redeemedDiscount, 25);
-  assert.deepEqual(redeemed.value.customer.rewards.availableRewards.map(reward=>reward.id), ['first-line']);
+  assert.deepEqual(redeemed.value.customer.rewards.availableRewards.map(reward=>reward.id), lineIds);
   assert.equal((await app.redeem(owner.cookie, code, 'blackout')).status, 409);
-  const line = await app.redeem(owner.cookie, code, 'first-line');
-  assert.equal(line.status, 200);
-  assert.equal(line.value.redemption.discount, 10);
-  assert.equal(line.value.customer.redemptions.length, 2);
+  for (const [index, rewardId] of lineIds.entries()) {
+    const line = await app.redeem(owner.cookie, code, rewardId);
+    assert.equal(line.status, 200);
+    assert.equal(line.value.redemption.discount, 10);
+    assert.equal(line.value.customer.redemptions.length, index + 2);
+    assert.equal((await app.redeem(owner.cookie, code, rewardId)).status, 409);
+  }
   await app.restart();
   const restored = await app.request('/api/customer', { cookie: customer.cookie });
   assert.equal(restored.value.customer.code, code);
   assert.equal(restored.value.customer.redeemed, true);
-  assert.deepEqual(restored.value.customer.redemptions.map(entry=>entry.discount), [25,10]);
+  assert.deepEqual(restored.value.customer.redemptions.map(entry=>entry.discount), [25,...lineIds.map(()=>10)]);
+  assert.equal(new Set(restored.value.customer.redemptions.map(entry=>entry.rewardId)).size, 11);
   assert.deepEqual(restored.value.customer.rewards.availableRewards, []);
   assert.equal(Object.keys(restored.value.customer.stamps).length, 16);
   assert.equal((await app.request('/api/owner/session', { cookie: owner.cookie })).status, 200);
@@ -266,19 +271,36 @@ test('a ten percent line reward and a later twenty-five percent full-card reward
   assert.equal(signup.value.customer.bingo.discount, 0);
   const row = await app.stamp(owner.cookie, code, ['maki', 'poke', 'gyoza', 'sushi-pizza']);
   assert.equal(row.value.customer.bingo.hasBingo, true);
-  const redeem = await app.redeem(owner.cookie, code, 'first-line', { discount: 25 });
+  const redeem = await app.redeem(owner.cookie, code, 'line-row-1', { discount: 25 });
   assert.equal(redeem.status, 200);
   assert.equal(redeem.value.redemption.discount, 10);
-  assert.equal(redeem.value.customer.redemptions[0].rewardId, 'first-line');
-  assert.equal((await app.redeem(owner.cookie, code, 'first-line')).status, 409);
+  assert.equal(redeem.value.customer.redemptions[0].rewardId, 'line-row-1');
+  assert.equal((await app.redeem(owner.cookie, code, 'line-row-1')).status, 409);
   const blackout = await app.stamp(owner.cookie, code, categories);
   assert.equal(blackout.value.customer.bingo.blackout, true);
-  assert.deepEqual(blackout.value.customer.rewards.availableRewards.map(reward=>reward.id), ['blackout']);
+  assert.deepEqual(blackout.value.customer.rewards.availableRewards.map(reward=>reward.id), [...lineIds.slice(1), 'blackout']);
   const fullReward = await app.redeem(owner.cookie, code, 'blackout', { discount: 100 });
   assert.equal(fullReward.status, 200);
   assert.equal(fullReward.value.redemption.discount, 25);
   assert.deepEqual(fullReward.value.customer.redemptions.map(entry=>entry.discount), [10,25]);
   assert.equal((await app.redeem(owner.cookie, code, 'blackout')).status, 409);
+});
+
+test('one newly stamped square can complete a row, column and diagonal as three separate rewards', async (t) => {
+  const app = await fixture(t);
+  const signup = await app.customer('ThreeLines');
+  const owner = await app.owner();
+  const code = signup.value.customer.code;
+  const preparatory = ['poke','gyoza','sushi-pizza','handroll','nigiri','senken','onigiri','salad','platter'];
+  const before = await app.stamp(owner.cookie, code, preparatory);
+  assert.deepEqual(before.value.customer.rewards.availableRewards, []);
+  const after = await app.stamp(owner.cookie, code, ['maki']);
+  assert.deepEqual(after.value.customer.rewards.availableRewards.map(reward=>reward.id), ['line-row-1','line-column-1','line-diagonal-main']);
+  const claims = await Promise.all(after.value.customer.rewards.availableRewards.map(reward=>app.redeem(owner.cookie,code,reward.id)));
+  assert.ok(claims.every(result=>result.status===200));
+  const customer = (await app.request('/api/customer',{cookie:signup.cookie})).value.customer;
+  assert.equal(customer.redemptions.length,3);
+  assert.deepEqual(customer.rewards.availableRewards,[]);
 });
 
 test('legacy anonymous passports retain history and need a complete profile before new account use', async (t) => {
@@ -463,7 +485,7 @@ test('stale correction dates fail atomically, absent squares are harmless and co
   assert.equal((await remove({ ...valid, expectedStamps: { maki: new Date(0).toISOString() } })).status, 409);
 });
 
-test('corrections change eligibility but never reopen either redeemed reward after re-stamping', async (t) => {
+test('corrections change eligibility but never reopen any of the ten redeemed lines or blackout after re-stamping', async (t) => {
   const app = await fixture(t);
   const signup = await app.customer('Redeemed');
   const owner = await app.owner();
@@ -471,15 +493,16 @@ test('corrections change eligibility but never reopen either redeemed reward aft
   const full = await app.stamp(owner.cookie, code, categories);
   assert.equal(full.value.customer.bingo.total, 16);
   assert.equal((await app.redeem(owner.cookie, code, 'blackout')).status, 200);
-  assert.equal((await app.redeem(owner.cookie, code, 'first-line')).status, 200);
+  for (const rewardId of lineIds) assert.equal((await app.redeem(owner.cookie, code, rewardId)).status, 200);
   const corrected = await app.request('/api/owner/stamps/remove', { method: 'POST', cookie: owner.cookie, body: { code, categories, requestId: createRequestId(), expectedStamps: full.value.customer.stamps } });
   assert.deepEqual(corrected.value.customer.stamps, {});
   assert.equal(corrected.value.customer.bingo.discount, 0);
-  assert.equal(corrected.value.customer.redemptions.length, 2);
+  assert.equal(corrected.value.customer.redemptions.length, 11);
   assert.deepEqual(corrected.value.customer.rewards.availableRewards, []);
-  await app.stamp(owner.cookie, code, categories);
+  const restamped = await app.stamp(owner.cookie, code, categories);
+  assert.deepEqual(restamped.value.customer.rewards.availableRewards, []);
   assert.equal((await app.redeem(owner.cookie, code, 'blackout')).status, 409);
-  assert.equal((await app.redeem(owner.cookie, code, 'first-line')).status, 409);
+  for (const rewardId of lineIds) assert.equal((await app.redeem(owner.cookie, code, rewardId)).status, 409);
 });
 
 test('version two accounts migrate exact food stamps to the new card while preserving legacy history and login', async (t) => {
@@ -593,41 +616,54 @@ test('redemption retries preserve the selected reward and cannot silently consum
   const code = signup.value.customer.code;
   await app.stamp(owner.cookie, code, categories);
   const requestId = createRequestId();
-  const first = await app.redeem(owner.cookie, code, 'first-line', { requestId });
+  const first = await app.redeem(owner.cookie, code, 'line-row-1', { requestId });
   assert.equal(first.status, 200);
-  const retry = await app.redeem(owner.cookie, code, 'first-line', { requestId: requestId.toUpperCase() });
+  const retry = await app.redeem(owner.cookie, code, 'line-row-1', { requestId: requestId.toUpperCase() });
   assert.equal(retry.status, 200);
   assert.equal(retry.value.repeated, true);
   assert.deepEqual(retry.value.redemption, first.value.redemption);
   assert.equal(retry.value.customer.redemptions.length, 1);
-  assert.deepEqual(retry.value.customer.rewards.availableRewards.map(reward=>reward.id), ['blackout']);
+  assert.deepEqual(retry.value.customer.rewards.availableRewards.map(reward=>reward.id), [...lineIds.slice(1), 'blackout']);
+  assert.equal((await app.redeem(owner.cookie, code, 'line-row-2', { requestId })).status, 409);
   assert.equal((await app.redeem(owner.cookie, code, 'blackout', { requestId })).status, 409);
   const full = await app.redeem(owner.cookie, code, 'blackout');
   assert.equal(full.status, 200);
-  const laterRetry = await app.redeem(owner.cookie, code, 'first-line', { requestId });
+  const laterRetry = await app.redeem(owner.cookie, code, 'line-row-1', { requestId });
   assert.equal(laterRetry.value.repeated, true);
   assert.deepEqual(laterRetry.value.redemption, first.value.redemption);
   assert.equal(laterRetry.value.customer.redemptions.length, 2);
   await app.store.transaction(state=>{delete state.requests[requestId];});
-  assert.equal((await app.redeem(owner.cookie, code, 'first-line')).status, 409);
+  const ledgerRetry = await app.redeem(owner.cookie, code, 'line-row-1', { requestId });
+  assert.equal(ledgerRetry.status, 200);
+  assert.equal(ledgerRetry.value.repeated, true);
+  assert.deepEqual(ledgerRetry.value.redemption, first.value.redemption);
+  assert.equal((await app.redeem(owner.cookie, code, 'line-row-2', { requestId })).status, 409);
+  const other = await app.customer('OtherRewardCard');
+  await app.stamp(owner.cookie, other.value.customer.code, categories);
+  assert.equal((await app.redeem(owner.cookie, other.value.customer.code, 'line-row-1', { requestId })).status, 409);
+  assert.equal((await app.redeem(owner.cookie, code, 'line-row-1')).status, 409);
 });
 
-test('parallel confirmations can redeem a selected discount only once and preserve the other reward', async (t) => {
+test('parallel confirmations redeem one selected line once and retain concurrent different-line claims', async (t) => {
   const app = await fixture(t);
   const signup = await app.customer('ParallelRewards');
   const owner = await app.owner();
   const code = signup.value.customer.code;
   await app.stamp(owner.cookie, code, categories);
-  const parallel = await Promise.all(Array.from({length:5},()=>app.redeem(owner.cookie,code,'first-line')));
+  const parallel = await Promise.all(Array.from({length:5},()=>app.redeem(owner.cookie,code,'line-row-1')));
   assert.deepEqual(parallel.map(result=>result.status).sort(),[200,409,409,409,409]);
   const customer = (await app.request('/api/customer',{cookie:signup.cookie})).value.customer;
   assert.equal(customer.redemptions.length,1);
-  assert.deepEqual(customer.rewards.availableRewards.map(reward=>reward.id),['blackout']);
+  assert.deepEqual(customer.rewards.availableRewards.map(reward=>reward.id),[...lineIds.slice(1), 'blackout']);
+  const distinct = await Promise.all(['line-row-2','line-column-1'].map(rewardId=>app.redeem(owner.cookie,code,rewardId)));
+  assert.ok(distinct.every(result=>result.status===200));
+  const afterDistinct = (await app.request('/api/customer',{cookie:signup.cookie})).value.customer;
+  assert.deepEqual(afterDistinct.redemptions.map(entry=>entry.rewardId).sort(), ['line-column-1','line-row-1','line-row-2']);
   const requestId=createRequestId();
   const retries = await Promise.all(Array.from({length:3},()=>app.redeem(owner.cookie,code,'blackout',{requestId})));
   assert.ok(retries.every(result=>result.status===200));
   assert.equal(retries.filter(result=>!result.value.repeated).length,1);
-  assert.ok(retries.every(result=>result.value.customer.redemptions.length===2));
+  assert.ok(retries.every(result=>result.value.customer.redemptions.length===4));
 });
 
 test('redemption requires an explicit current reward and customer profile updates cannot forge or clear its history', async (t) => {
@@ -639,16 +675,21 @@ test('redemption requires an explicit current reward and customer profile update
   const oldClient=await app.request('/api/owner/redeem',{method:'POST',cookie:owner.cookie,body:{code,requestId:createRequestId()}});
   assert.equal(oldClient.status,409);
   assert.match(oldClient.value.error,/Refresh this page/);
-  for(const rewardId of ['invalid',25,['first-line'],null]) assert.equal((await app.redeem(owner.cookie,code,rewardId)).status,400);
-  assert.equal((await app.redeem(owner.cookie,code,'first-line',{requestId:undefined})).status,400);
+  const aggregateClient=await app.redeem(owner.cookie,code,'first-line');
+  assert.equal(aggregateClient.status,409);
+  assert.match(aggregateClient.value.error,/Refresh this page/);
+  for(const rewardId of ['invalid',25,['line-row-1'],null]) assert.equal((await app.redeem(owner.cookie,code,rewardId)).status,400);
+  assert.equal((await app.redeem(owner.cookie,code,'line-row-1',{requestId:undefined})).status,400);
   assert.equal((await app.redeem(owner.cookie,code,'blackout')).status,409);
-  const redeemed=await app.redeem(owner.cookie,code,'first-line');
+  assert.equal((await app.redeem(owner.cookie,code,'line-row-2')).status,409);
+  assert.equal((await app.redeem(owner.cookie,code,'line-column-1')).status,409);
+  const redeemed=await app.redeem(owner.cookie,code,'line-row-1');
   assert.equal(redeemed.status,200);
   const forged=await app.request('/api/customer',{method:'PATCH',cookie:signup.cookie,body:{firstName:'ProtectedRewards',lastName:'Guest',email:signup.value.customer.email,redemptions:[],redeemed:false,redeemedDiscount:0,rewards:{availableRewards:[{id:'blackout',discount:25}]}}});
   assert.equal(forged.status,200);
   assert.deepEqual(forged.value.customer.redemptions,redeemed.value.customer.redemptions);
   assert.deepEqual(forged.value.customer.rewards.availableRewards,[]);
-  assert.equal((await app.redeem(owner.cookie,code,'first-line')).status,409);
+  assert.equal((await app.redeem(owner.cookie,code,'line-row-1')).status,409);
 });
 
 test('an unredeemed full-card discount is unavailable after a correction and returns after a legitimate re-stamp', async (t) => {
@@ -657,50 +698,60 @@ test('an unredeemed full-card discount is unavailable after a correction and ret
   const owner=await app.owner();
   const code=signup.value.customer.code;
   const full=await app.stamp(owner.cookie,code,categories);
-  const line=await app.redeem(owner.cookie,code,'first-line');
+  const line=await app.redeem(owner.cookie,code,'line-row-1');
   const corrected=await app.request('/api/owner/stamps/remove',{method:'POST',cookie:owner.cookie,body:{code,categories:['maki'],requestId:createRequestId(),expectedStamps:{maki:full.value.customer.stamps.maki}}});
   assert.equal(corrected.status,200);
   assert.deepEqual(corrected.value.customer.redemptions,line.value.customer.redemptions);
-  assert.deepEqual(corrected.value.customer.rewards.availableRewards,[]);
+  assert.deepEqual(corrected.value.customer.rewards.availableRewards.map(reward=>reward.id),lineIds.filter(id=>!['line-row-1','line-column-1','line-diagonal-main'].includes(id)));
   assert.equal((await app.redeem(owner.cookie,code,'blackout')).status,409);
   const restamped=await app.stamp(owner.cookie,code,['maki']);
-  assert.deepEqual(restamped.value.customer.rewards.availableRewards.map(reward=>reward.id),['blackout']);
+  assert.deepEqual(restamped.value.customer.rewards.availableRewards.map(reward=>reward.id),[...lineIds.slice(1), 'blackout']);
   assert.equal((await app.redeem(owner.cookie,code,'blackout')).status,200);
-  assert.equal((await app.redeem(owner.cookie,code,'first-line')).status,409);
+  assert.equal((await app.redeem(owner.cookie,code,'line-row-1')).status,409);
 });
 
-test('legacy reward summaries preserve known usage and conservatively reserve unknown history', async (t) => {
+test('legacy summaries preserve one unknown-line credit for known 10%, only blackout for 25%, and block unknown history', async (t) => {
   const app=await fixture(t);
   const owner=await app.owner();
   const date=new Date().toISOString();
-  for(const [name,previousDiscount,availableId,usedId] of [['UsedTen',10,'blackout','first-line'],['UsedTwentyFive',25,'first-line','blackout'],['Unknown',null,null,'legacy-unknown']]){
+  for(const [name,previousDiscount,usedId,remainingLines] of [['UsedTen',10,'first-line',9],['UsedTwentyFive',25,'blackout',10],['Unknown',null,'legacy-unknown',0]]){
     const signup=await app.customer(name);
     await app.store.transaction(state=>{
       const customer=state.customers[signup.value.customer.id];
       customer.stamps=Object.fromEntries(categories.map(id=>[id,date]));
       customer.redeemed=true;
       customer.redeemedDiscount=previousDiscount;
-      // A concurrent older function can still write the old fields after a
-      // newer deployment first created this empty array. Preserve that use.
+      // An older in-flight function can write these summary fields after a
+      // newer deployment first created an empty ledger. Preserve that use.
       customer.redemptions=[];
     });
     await app.restart();
-    const restored=(await app.request('/api/customer',{cookie:signup.cookie})).value.customer;
+    let restored=(await app.request('/api/customer',{cookie:signup.cookie})).value.customer;
     assert.equal(restored.redemptions.length,1);
     assert.equal(restored.redemptions[0].rewardId,usedId);
     assert.equal(restored.redemptions[0].discount,previousDiscount);
-    if(availableId){
-      assert.deepEqual(restored.rewards.availableRewards.map(reward=>reward.id),[availableId]);
-      assert.equal((await app.redeem(owner.cookie,restored.code,usedId)).status,409);
-      const next=await app.redeem(owner.cookie,restored.code,availableId);
-      assert.equal(next.status,200);
-      assert.equal(next.value.customer.redemptions.length,2);
-    }else{
+    assert.equal(restored.rewards.availableRewards.filter(reward=>reward.discount===10).length,remainingLines);
+    assert.equal(restored.rewards.availableRewards.some(reward=>reward.id==='blackout'),previousDiscount===10);
+    if(previousDiscount===null){
       assert.equal(restored.rewards.legacyUnknown,true);
       assert.deepEqual(restored.rewards.availableRewards,[]);
-      assert.equal((await app.redeem(owner.cookie,restored.code,'first-line')).status,409);
-      assert.equal((await app.redeem(owner.cookie,restored.code,'blackout')).status,409);
+      for(const rewardId of [...lineIds,'blackout']) assert.equal((await app.redeem(owner.cookie,restored.code,rewardId)).status,409);
+      continue;
     }
+    const oldRequest=await app.redeem(owner.cookie,restored.code,usedId);
+    assert.equal(oldRequest.status,409);
+    if(previousDiscount===10) assert.match(oldRequest.value.error,/Refresh this page/);
+    while(restored.rewards.availableRewards.length){
+      const next=await app.redeem(owner.cookie,restored.code,restored.rewards.availableRewards[0].id);
+      assert.equal(next.status,200);
+      restored=next.value.customer;
+    }
+    assert.equal(restored.redemptions.length,11);
+    assert.equal(restored.redemptions.filter(entry=>entry.discount===10).length,10);
+    assert.equal(restored.redemptions.filter(entry=>entry.discount===25).length,1);
+    // Retain the old aggregate receipt as a credit; never rewrite it as a
+    // specific row, column, or diagonal that the old record cannot prove.
+    assert.equal(restored.redemptions[0].rewardId,usedId);
   }
 });
 
@@ -712,12 +763,132 @@ test('a failed durable redemption is not acknowledged or recorded and the same r
   await app.stamp(owner.cookie,code,['maki','poke','gyoza','sushi-pizza']);
   const requestId=createRequestId(),persist=app.store.persist;
   app.store.persist=async()=>{throw new Error('Simulated unavailable private storage');};
-  const failed=await app.redeem(owner.cookie,code,'first-line',{requestId});
+  const failed=await app.redeem(owner.cookie,code,'line-row-1',{requestId});
   assert.equal(failed.status,500);
   assert.equal(await app.store.read(state=>state.customers[signup.value.customer.id].redemptions.length),0);
   assert.equal(await app.store.read(state=>state.requests[requestId]),undefined);
   app.store.persist=persist;
-  const succeeded=await app.redeem(owner.cookie,code,'first-line',{requestId});
+  const succeeded=await app.redeem(owner.cookie,code,'line-row-1',{requestId});
   assert.equal(succeeded.status,200);
   assert.equal(succeeded.value.customer.redemptions.length,1);
+});
+
+test('a legacy aggregate reward receipt replays its original discount with the current customer after deployment', async (t) => {
+  const app=await fixture(t);
+  const signup=await app.customer('LegacyReceipt');
+  const owner=await app.owner();
+  const code=signup.value.customer.code;
+  const requestId=randomUUID(),date=new Date().toISOString();
+  const redemption={id:requestId,rewardId:'first-line',discount:10,date,actor:'owner'};
+  await app.store.transaction(state=>{
+    const customer=state.customers[signup.value.customer.id];
+    customer.stamps=Object.fromEntries(categories.map(id=>[id,date]));
+    customer.redemptions=[redemption];
+    customer.redeemed=true;
+    customer.redeemedDiscount=10;
+    state.requests[requestId]={operation:'redeem',fingerprint:createHash('sha256').update(JSON.stringify({operation:'redeem',code,rewardId:'first-line'})).digest('hex'),redemption,date};
+  });
+  const next=await app.redeem(owner.cookie,code,'line-row-2');
+  assert.equal(next.status,200);
+  const replay=await app.redeem(owner.cookie,code,'first-line',{requestId:requestId.toUpperCase()});
+  assert.equal(replay.status,200);
+  assert.equal(replay.value.repeated,true);
+  assert.deepEqual(replay.value.redemption,redemption);
+  assert.deepEqual(replay.value.customer.redemptions,next.value.customer.redemptions);
+  assert.equal((await app.redeem(owner.cookie,code,'line-row-3',{requestId})).status,409);
+  const stale=await app.redeem(owner.cookie,code,'first-line');
+  assert.equal(stale.status,409);
+  assert.match(stale.value.error,/Refresh this page/);
+  assert.equal((await app.request('/api/customer',{cookie:signup.cookie})).value.customer.redemptions.length,2);
+});
+
+test('expired request receipts are pruned while permanent line history still prevents another use', async (t) => {
+  const app=await fixture(t);
+  const signup=await app.customer('PrunedReward');
+  const owner=await app.owner();
+  const code=signup.value.customer.code;
+  await app.stamp(owner.cookie,code,categories);
+  const saved=await app.redeem(owner.cookie,code,'line-row-1');
+  const expired=Date.now()-REQUEST_MAX_AGE_MS-1000;
+  const timestamp=expired.toString(16).padStart(12,'0');
+  const requestId=`${timestamp.slice(0,8)}-${timestamp.slice(8)}-${createRequestId().slice(14)}`;
+  const redemption={...saved.value.redemption,id:requestId,date:new Date(expired).toISOString()};
+  await app.store.transaction(state=>{
+    const customer=state.customers[signup.value.customer.id];
+    customer.redemptions=[redemption];
+    customer.rewardHistory=[redemption];
+    delete state.requests[saved.value.redemption.id];
+    state.requests[requestId]={operation:'redeem',fingerprint:createHash('sha256').update(JSON.stringify({operation:'redeem',code,rewardId:'line-row-1'})).digest('hex'),redemption,date:redemption.date};
+  });
+  await app.store.transaction(()=>{});
+  assert.equal(await app.store.read(state=>state.requests[requestId]),undefined);
+  assert.equal((await app.redeem(owner.cookie,code,'line-row-1',{requestId})).status,410);
+  assert.equal((await app.redeem(owner.cookie,code,'line-row-1')).status,409);
+  await app.restart();
+  const customer=(await app.request('/api/customer',{cookie:signup.cookie})).value.customer;
+  assert.deepEqual(customer.redemptions,[redemption]);
+  assert.equal(customer.rewards.availableRewards.some(reward=>reward.id==='line-row-1'),false);
+  assert.equal((await app.redeem(owner.cookie,code,'line-row-2')).status,200);
+});
+
+test('a previous warm function cannot erase a named line use by rewriting its older public ledger', async (t) => {
+  const app=await fixture(t);
+  const signup=await app.customer('WarmFunction');
+  const owner=await app.owner();
+  const code=signup.value.customer.code;
+  await app.stamp(owner.cookie,code,categories);
+  const saved=await app.redeem(owner.cookie,code,'line-row-3');
+  for(const replacement of [[],[{...saved.value.redemption,rewardId:'first-line'}],[{id:'legacy-first-line',rewardId:'first-line',discount:10,date:null,actor:'owner',legacy:true}]]){
+    await app.store.transaction(state=>{state.customers[signup.value.customer.id].redemptions=replacement;});
+    await app.restart();
+    const restored=(await app.request('/api/customer',{cookie:signup.cookie})).value.customer;
+    assert.deepEqual(restored.redemptions,saved.value.customer.redemptions);
+    assert.equal(restored.rewardHistory,undefined);
+    assert.equal(restored.rewards.availableRewards.filter(reward=>reward.discount===10).length,9);
+    assert.equal((await app.redeem(owner.cookie,code,'line-row-3')).status,409);
+  }
+  const forged=await app.request('/api/customer',{method:'PATCH',cookie:signup.cookie,body:{firstName:'WarmFunction',lastName:'Guest',email:signup.value.customer.email,rewardHistory:[],redemptions:[]}});
+  assert.deepEqual(forged.value.customer.redemptions,saved.value.customer.redemptions);
+  assert.equal((await app.redeem(owner.cookie,code,'line-row-1')).status,200);
+});
+
+test('real old warm-function rewards join private history even after their request receipts are pruned', async (t) => {
+  const app=await fixture(t);
+  const owner=await app.owner();
+  for(const [name,firstReward,oldReward,oldDiscount] of [['OldBlackout','line-row-3','blackout',25],['OldLine','blackout','first-line',10]]){
+    const signup=await app.customer(name);
+    const code=signup.value.customer.code;
+    await app.stamp(owner.cookie,code,categories);
+    const first=await app.redeem(owner.cookie,code,firstReward);
+    assert.equal(first.status,200);
+    const expired=Date.now()-REQUEST_MAX_AGE_MS-1000;
+    const timestamp=expired.toString(16).padStart(12,'0');
+    const requestId=`${timestamp.slice(0,8)}-${timestamp.slice(8)}-${createRequestId().slice(14)}`;
+    const oldRedemption={id:requestId,rewardId:oldReward,discount:oldDiscount,date:new Date(expired).toISOString(),actor:'owner'};
+    await app.store.transaction(state=>{
+      const customer=state.customers[signup.value.customer.id];
+      // The old function preserves private history but rewrites its known
+      // public schema, then records the genuine new discount it just applied.
+      customer.redemptions=oldReward==='blackout'
+        ? [{id:'legacy-first-line',rewardId:'first-line',discount:10,date:null,actor:'owner',legacy:true},oldRedemption]
+        : [first.value.redemption,oldRedemption];
+      customer.redeemed=true;
+      customer.redeemedDiscount=oldDiscount;
+      state.requests[requestId]={operation:'redeem',fingerprint:createHash('sha256').update(JSON.stringify({operation:'redeem',code,rewardId:oldReward})).digest('hex'),redemption:oldRedemption,date:oldRedemption.date};
+    });
+    // Local and Blob transactions prune receipts before account migration.
+    // History must remain recoverable from the durable public UUID record.
+    await app.store.transaction(()=>{});
+    assert.equal(await app.store.read(state=>state.requests[requestId]),undefined);
+    await app.restart();
+    const restored=(await app.request('/api/customer',{cookie:signup.cookie})).value.customer;
+    assert.deepEqual(restored.redemptions,[first.value.redemption,oldRedemption]);
+    assert.equal(restored.rewards.availableRewards.filter(reward=>reward.discount===10).length,9);
+    assert.equal(restored.rewards.availableRewards.some(reward=>reward.id==='blackout'),false);
+    assert.equal((await app.redeem(owner.cookie,code,oldReward)).status,409);
+    const next=await app.redeem(owner.cookie,code,restored.rewards.availableRewards[0].id);
+    assert.equal(next.status,200);
+    assert.deepEqual(next.value.customer.redemptions.slice(0,2),restored.redemptions);
+    assert.deepEqual(await app.store.read(state=>state.customers[signup.value.customer.id].rewardHistory),next.value.customer.redemptions);
+  }
 });

@@ -6,18 +6,23 @@ import { createRequestId } from '../src/request-id.js';
 import { BlobStore } from '../server/blob-store.js';
 import { createNetlifyHandler } from '../server/netlify-handler.js';
 
+const lineIds = ['line-row-1', 'line-row-2', 'line-row-3', 'line-row-4', 'line-column-1', 'line-column-2', 'line-column-3', 'line-column-4', 'line-diagonal-main', 'line-diagonal-anti'];
+
 function fixture({ password = '', alwaysConflict = false, ownerAccessRecord = null } = {}) {
-  let state = null, etag = 0, conflict = alwaysConflict;
+  let state = null, etag = 0, conflict = alwaysConflict, casConflicts = 0;
   const blobs = {
     async getWithMetadata() { return state ? { data: structuredClone(state), etag: `"${etag}"` } : null; },
     async setJSON(key, next, condition) {
-      if (conflict || (condition.onlyIfNew ? state !== null : condition.onlyIfMatch !== `"${etag}"`)) return { modified: false };
+      if (conflict || (condition.onlyIfNew ? state !== null : condition.onlyIfMatch !== `"${etag}"`)) {
+        casConflicts++;
+        return { modified: false };
+      }
       state = structuredClone(next);
       return { modified: true, etag: `"${++etag}"` };
     },
   };
   const handler = createNetlifyHandler({
-    storeFactory: () => new BlobStore({ blobs, maxAttempts: 8, retryDelay: async () => {} }),
+    storeFactory: () => new BlobStore({ blobs, maxAttempts: 16, retryDelay: async () => {} }),
     appFactory: (options) => createApp({ ...options, ownerPassword: password, ownerAccessRecord }),
   });
   async function request(path, { method = 'GET', body, cookie, headers = {} } = {}) {
@@ -27,7 +32,7 @@ function fixture({ password = '', alwaysConflict = false, ownerAccessRecord = nu
     }), { ip: '203.0.113.7' });
     return { status: response.status, value: await response.json(), headers: response.headers, cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
-  return { request, failWrites: (value) => { conflict = value; } };
+  return { request, failWrites: (value) => { conflict = value; }, get casConflicts() { return casConflicts; } };
 }
 
 test('Netlify bridge handles API rewrites and never permits public first-owner setup', async () => {
@@ -138,7 +143,7 @@ test('Netlify returning customers use only last name and email to open their exi
 });
 
 
-test('Netlify callers redeem the two rewards independently with atomic and idempotent confirmations', async () => {
+test('Netlify callers atomically redeem all ten distinct lines and one blackout with idempotent confirmations', async () => {
   const password='test-owner-password-only';
   const api=fixture({password});
   const signup=await api.request('/api/customer',{method:'POST',body:{firstName:'Multiple',lastName:'Rewards',email:'multiple-rewards@example.test'}});
@@ -148,29 +153,36 @@ test('Netlify callers redeem the two rewards independently with atomic and idemp
   const stamp=(chosen)=>api.request('/api/owner/stamps',{method:'POST',cookie:owner.cookie,body:{code,categories:chosen,directOrder:false,requestId:createRequestId()}});
   const redeem=(rewardId,requestId=createRequestId(),cookie=owner.cookie)=>api.request('/.netlify/functions/api/owner/redeem',{method:'POST',cookie,body:{code,rewardId,requestId}});
   await stamp(categories.slice(0,4));
-  assert.equal((await redeem('first-line',createRequestId(),signup.cookie)).status,401);
-  const concurrent=await Promise.all(Array.from({length:5},()=>redeem('first-line')));
+  assert.equal((await redeem('line-row-1',createRequestId(),signup.cookie)).status,401);
+  const concurrent=await Promise.all(Array.from({length:5},()=>redeem('line-row-1')));
   assert.deepEqual(concurrent.map(result=>result.status).sort(),[200,409,409,409,409]);
   const first=concurrent.find(result=>result.status===200);
   assert.equal(first.value.redemption.discount,10);
-  const retry=await redeem('first-line',first.value.redemption.id);
+  const retry=await redeem('line-row-1',first.value.redemption.id);
   assert.equal(retry.status,200);
   assert.equal(retry.value.repeated,true);
   assert.deepEqual(retry.value.redemption,first.value.redemption);
   const full=await stamp(categories);
-  assert.deepEqual(full.value.customer.rewards.availableRewards.map(reward=>reward.id),['blackout']);
+  assert.deepEqual(full.value.customer.rewards.availableRewards.map(reward=>reward.id),[...lineIds.slice(1),'blackout']);
+  const distinct=await Promise.all(lineIds.slice(1).map(rewardId=>redeem(rewardId)));
+  assert.ok(distinct.every(result=>result.status===200));
+  assert.ok(api.casConflicts>0);
+  const lines=(await api.request('/api/customer',{cookie:signup.cookie})).value.customer;
+  assert.equal(lines.redemptions.length,10);
+  assert.deepEqual(lines.redemptions.map(entry=>entry.rewardId).sort(),[...lineIds].sort());
+  assert.deepEqual(lines.rewards.availableRewards.map(reward=>reward.id),['blackout']);
   const fullRequest=createRequestId();
   const repeated=await Promise.all(Array.from({length:3},()=>redeem('blackout',fullRequest)));
   assert.ok(repeated.every(result=>result.status===200));
   assert.equal(repeated.filter(result=>!result.value.repeated).length,1);
   const customer=(await api.request('/api/customer',{cookie:signup.cookie})).value.customer;
-  assert.deepEqual(customer.redemptions.map(entry=>entry.discount),[10,25]);
+  assert.deepEqual(customer.redemptions.map(entry=>entry.discount),[...lineIds.map(()=>10),25]);
   assert.deepEqual(customer.rewards.availableRewards,[]);
   assert.equal((await redeem('blackout')).status,409);
-  const replay=await redeem('first-line',first.value.redemption.id);
+  const replay=await redeem('line-row-1',first.value.redemption.id);
   assert.equal(replay.value.repeated,true);
-  assert.equal(replay.value.customer.redemptions.length,2);
-  assert.equal(replay.value.redemption.rewardId,'first-line');
+  assert.equal(replay.value.customer.redemptions.length,11);
+  assert.equal(replay.value.redemption.rewardId,'line-row-1');
 });
 
 test('a failed Netlify redemption commit cannot consume a reward or acknowledge a discount', async () => {
@@ -180,7 +192,7 @@ test('a failed Netlify redemption commit cannot consume a reward or acknowledge 
   const owner=await api.request('/api/owner/login',{method:'POST',body:{password}});
   const code=signup.value.customer.code;
   await api.request('/api/owner/stamps',{method:'POST',cookie:owner.cookie,body:{code,categories:['maki','poke','gyoza','sushi-pizza'],directOrder:false,requestId:createRequestId()}});
-  const body={code,rewardId:'first-line',requestId:createRequestId()};
+  const body={code,rewardId:'line-row-1',requestId:createRequestId()};
   api.failWrites(true);
   const failed=await api.request('/api/owner/redeem',{method:'POST',cookie:owner.cookie,body});
   assert.equal(failed.status,503);
@@ -188,7 +200,7 @@ test('a failed Netlify redemption commit cannot consume a reward or acknowledge 
   api.failWrites(false);
   const unchanged=await api.request('/api/customer',{cookie:signup.cookie});
   assert.deepEqual(unchanged.value.customer.redemptions,[]);
-  assert.deepEqual(unchanged.value.customer.rewards.availableRewards.map(reward=>reward.id),['first-line']);
+  assert.deepEqual(unchanged.value.customer.rewards.availableRewards.map(reward=>reward.id),['line-row-1']);
   const saved=await api.request('/api/owner/redeem',{method:'POST',cookie:owner.cookie,body});
   assert.equal(saved.status,200);
   assert.equal(saved.value.customer.redemptions.length,1);
