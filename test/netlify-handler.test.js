@@ -69,6 +69,58 @@ test('Netlify requests share durable customer and owner state through the HTTP a
   assert.equal(blocked.status, 403);
 });
 
+test('Netlify card resets commit durably once and a failed write never clears stamps or rewards', async () => {
+  const password = 'test-reset-password-only';
+  const api = fixture({ password });
+  const signup = await api.request('/api/customer', { method: 'POST', body: { firstName: 'Reset', lastName: 'Customer', email: 'reset-netlify@example.test' } });
+  const code = signup.value.customer.code;
+  const owner = await api.request('/api/owner/login', { method: 'POST', body: { password } });
+  const award = { code, categories: ['maki', 'poke', 'gyoza', 'sushi-pizza'], directOrder: true, requestId: createRequestId() };
+  assert.equal((await api.request('/api/owner/stamps', { method: 'POST', cookie: owner.cookie, body: award })).status, 200);
+  const redeemed = await api.request('/api/owner/redeem', { method: 'POST', cookie: owner.cookie, body: { code, rewardId: 'line-row-1', requestId: createRequestId() } });
+  const old = redeemed.value.customer;
+  const reset = { code, cardVersion: old.cardVersion, expectedStamps: old.stamps, expectedRedemptions: old.redemptions, requestId: createRequestId() };
+  api.failWrites(true);
+  const failed = await api.request('/.netlify/functions/api/owner/card/reset', { method: 'POST', cookie: owner.cookie, body: reset });
+  assert.equal(failed.status, 503);
+  const unchanged = (await api.request('/api/customer', { cookie: signup.cookie })).value.customer;
+  assert.equal(unchanged.cardVersion, 0);
+  assert.deepEqual(unchanged.stamps, old.stamps);assert.deepEqual(unchanged.redemptions, old.redemptions);
+  api.failWrites(false);
+  const resets = await Promise.all(Array.from({ length: 2 }, () => api.request('/api/owner/card/reset', { method: 'POST', cookie: owner.cookie, body: reset })));
+  assert.ok(resets.every(result => result.status === 200));
+  assert.equal(resets.filter(result => result.value.repeated === true).length, 1);
+  assert.ok(resets.every(result => result.value.customer.cardVersion === 1));
+  const fresh = (await api.request('/api/customer', { cookie: signup.cookie })).value.customer;
+  assert.deepEqual(fresh.stamps, {});assert.deepEqual(fresh.redemptions, []);
+  assert.equal(fresh.cardHistory, undefined);
+  assert.equal((await api.request('/api/owner/stamps', { method: 'POST', cookie: owner.cookie, body: award })).status, 409);
+  const stamped = await api.request('/api/owner/stamps', { method: 'POST', cookie: owner.cookie, body: { ...award, cardVersion: 1, requestId: createRequestId() } });
+  assert.deepEqual(stamped.value.customer.rewards.availableRewards.map(reward => reward.id), ['line-row-1']);
+});
+
+test('concurrent Netlify stamp and reset requests cannot erase a visit that was not reviewed', async () => {
+  const password = 'test-race-password-only';
+  const api = fixture({ password });
+  const signup = await api.request('/api/customer', { method: 'POST', body: { firstName: 'Race', lastName: 'Customer', email: 'race-netlify@example.test' } });
+  const code = signup.value.customer.code;
+  const owner = await api.request('/api/owner/login', { method: 'POST', body: { password } });
+  const first = await api.request('/api/owner/stamps', { method: 'POST', cookie: owner.cookie, body: { code, categories: ['maki'], directOrder: true, requestId: createRequestId() } });
+  const old = first.value.customer;
+  const [reset, award] = await Promise.all([
+    api.request('/api/owner/card/reset', { method: 'POST', cookie: owner.cookie, body: { code, cardVersion: 0, expectedStamps: old.stamps, expectedRedemptions: [], requestId: createRequestId() } }),
+    api.request('/api/owner/stamps', { method: 'POST', cookie: owner.cookie, body: { code, cardVersion: 0, categories: ['poke'], directOrder: true, requestId: createRequestId() } }),
+  ]);
+  assert.deepEqual([reset.status, award.status].sort(), [200, 409]);
+  assert.ok(api.casConflicts > 0);
+  const final = (await api.request('/api/customer', { cookie: signup.cookie })).value.customer;
+  if (reset.status === 200) {
+    assert.equal(final.cardVersion, 1);assert.deepEqual(final.stamps, {});
+  } else {
+    assert.equal(final.cardVersion, 0);assert.deepEqual(Object.keys(final.stamps).sort(), ['maki', 'poke']);
+  }
+});
+
 test('oversized function bodies are rejected before storage is initialized', async () => {
   let initialized = false;
   const handler = createNetlifyHandler({ storeFactory: () => { initialized = true; throw new Error('must not be called'); } });

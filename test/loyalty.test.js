@@ -26,6 +26,14 @@ test('4x4 board keeps all sixteen food squares and the renamed Sushi Burrito sta
   assert.equal(getRewardStatus(used).usedRewards[0].id,'line-row-3');
 });
 
+test('card versions survive normalization and reward updates after a reset',()=>{
+  assert.equal(normalizePassport({}).cardVersion,0);
+  assert.equal(normalizePassport({cardVersion:2}).cardVersion,2);
+  assert.equal(normalizePassport({cardVersion:-1}).cardVersion,0);
+  const next=redeem({...emptyPassport(),cardVersion:2,stamps:firstLine()},'line-row-1');
+  assert.equal(next.cardVersion,2);
+});
+
 test('all four rows, four columns and two diagonals require four stamps for ten percent',()=>{
   assert.equal(BINGO_LINES.length,10);
   for(const line of BINGO_LINES){

@@ -46,8 +46,124 @@ async function fixture(t, options = {}) {
   async function redeem(cookie, code, rewardId = 'line-row-1', extra = {}) {
     return request('/api/owner/redeem', { method: 'POST', cookie, body: { code, rewardId, requestId: createRequestId(), ...extra } });
   }
-  return { request, customer, owner, stamp, redeem, dataDir, get store() { return app.store; }, restart: async () => { await close(); await open(); } };
+  async function reset(cookie, customer, extra = {}) {
+    return request('/api/owner/card/reset', { method: 'POST', cookie, body: { code: customer.code, cardVersion: customer.cardVersion, expectedStamps: customer.stamps, expectedRedemptions: customer.redemptions, requestId: createRequestId(), ...extra } });
+  }
+  return { request, customer, owner, stamp, redeem, reset, dataDir, get store() { return app.store; }, restart: async () => { await close(); await open(); } };
 }
+
+test('only an owner can archive a card and start fresh rewards without changing the account or QR code', async t => {
+  const app = await fixture(t);
+  const signup = await app.customer('Reset');
+  const owner = await app.owner();
+  const { id, code } = signup.value.customer;
+  assert.equal(signup.value.customer.cardVersion, 0);
+  await app.stamp(owner.cookie, code, categories);
+  await app.redeem(owner.cookie, code);
+  const old = (await app.redeem(owner.cookie, code, 'blackout')).value.customer;
+  assert.equal((await app.reset(undefined, old)).status, 401);
+  assert.equal((await app.reset(signup.cookie, old)).status, 401);
+  const crossSite = await app.request('/api/owner/card/reset', { method: 'POST', cookie: owner.cookie, headers: { Origin: 'https://other.example' }, body: {} });
+  assert.equal(crossSite.status, 403);
+  const saved = await app.reset(owner.cookie, old);
+  assert.equal(saved.status, 200);
+  const current = saved.value.customer;
+  assert.equal(current.cardVersion, 1);
+  assert.equal(current.id, id);assert.equal(current.code, code);
+  assert.equal(current.email, old.email);assert.equal(current.name, old.name);
+  assert.deepEqual(current.stamps, {});assert.deepEqual(current.redemptions, []);
+  assert.equal(current.redeemed, false);assert.equal(current.redeemedDiscount, 0);
+  assert.deepEqual(current.rewards.availableRewards, []);
+  assert.deepEqual(current.orders, old.orders);assert.equal(current.directOrders, old.directOrders);
+  assert.equal(current.cardHistory, undefined);assert.equal(current.rewardHistory, undefined);
+  const archived = await app.store.read(state => structuredClone(state.customers[id].cardHistory));
+  assert.equal(archived.length, 1);assert.equal(archived[0].cardVersion, 0);
+  assert.deepEqual(archived[0].stamps, old.stamps);
+  assert.deepEqual(archived[0].redemptions, old.redemptions);
+  assert.deepEqual(archived[0].rewardHistory, old.redemptions);
+  assert.equal(archived[0].actor, 'owner');assert.equal(archived[0].redeemed, true);
+  await app.restart();
+  const polled = await app.request('/api/customer', { cookie: signup.cookie });
+  assert.equal(polled.value.customer.cardVersion, 1);assert.equal(polled.value.customer.code, code);
+  const login = await app.request('/api/customer/login', { method: 'POST', body: { lastName: 'Guest', email: old.email } });
+  assert.equal(login.status, 200);assert.equal(login.value.customer.id, id);
+  const restamped = await app.stamp(owner.cookie, code, categories, { cardVersion: 1 });
+  assert.deepEqual(restamped.value.customer.rewards.availableRewards.map(reward => reward.id), [...lineIds, 'blackout']);
+  assert.equal((await app.redeem(owner.cookie, code, 'line-row-1', { cardVersion: 1 })).status, 200);
+  const blackout = await app.redeem(owner.cookie, code, 'blackout', { cardVersion: 1 });
+  assert.equal(blackout.status, 200);
+  assert.deepEqual(blackout.value.customer.redemptions.map(reward => reward.discount), [10, 25]);
+  assert.deepEqual(await app.store.read(state => state.customers[id].cardHistory), archived);
+});
+
+test('card reset checks the full stamp and reward snapshots and accepts equivalent object key order', async t => {
+  const app = await fixture(t);
+  const signup = await app.customer('Snapshot');
+  const owner = await app.owner();
+  const { id, code } = signup.value.customer;
+  const first = (await app.stamp(owner.cookie, code, ['maki'])).value.customer;
+  const stamped = (await app.stamp(owner.cookie, code, categories.slice(0, 4))).value.customer;
+  assert.equal((await app.reset(owner.cookie, first)).status, 409);
+  const redeemed = (await app.redeem(owner.cookie, code)).value.customer;
+  assert.deepEqual(redeemed.stamps, stamped.stamps);
+  assert.equal((await app.reset(owner.cookie, stamped)).status, 409);
+  assert.equal((await app.reset(owner.cookie, redeemed, { expectedStamps: {} })).status, 409);
+  assert.equal((await app.reset(owner.cookie, redeemed, { expectedRedemptions: [] })).status, 409);
+  assert.equal((await app.reset(owner.cookie, redeemed, { cardVersion: undefined })).status, 400);
+  assert.equal((await app.reset(owner.cookie, redeemed, { expectedRedemptions: undefined })).status, 400);
+  assert.equal((await app.reset(owner.cookie, redeemed, { expectedStamps: { invalid: 'bad' } })).status, 400);
+  assert.equal(await app.store.read(state => state.customers[id].cardHistory), undefined);
+  const reordered = Object.fromEntries(Object.entries(redeemed.stamps).reverse());
+  const result = await app.reset(owner.cookie, redeemed, { expectedStamps: reordered });
+  assert.equal(result.status, 200);assert.equal(result.value.customer.cardVersion, 1);
+});
+
+test('card reset retries are idempotent and stale visits, corrections and redemptions cannot change a replacement', async t => {
+  const app = await fixture(t);
+  const signup = await app.customer('Version');
+  const owner = await app.owner();
+  const { id, code } = signup.value.customer;
+  const awardId = createRequestId();
+  const stamped = await app.stamp(owner.cookie, code, categories.slice(0, 4), { requestId: awardId });
+  await app.store.transaction(state => {
+    const receipt = state.requests[awardId];
+    delete receipt.operation;delete receipt.cardVersion;
+    receipt.fingerprint = createHash('sha256').update(JSON.stringify({ code, categories: categories.slice(0, 4).sort(), directOrder: true })).digest('hex');
+  });
+  assert.equal((await app.stamp(owner.cookie, code, categories.slice(0, 4), { requestId: awardId })).value.repeated, true);
+  const removalId = createRequestId();
+  const removal = { code, categories: ['maki'], expectedStamps: { maki: stamped.value.customer.stamps.maki }, requestId: removalId };
+  assert.equal((await app.request('/api/owner/stamps/remove', { method: 'POST', cookie: owner.cookie, body: removal })).status, 200);
+  await app.stamp(owner.cookie, code, ['maki']);
+  const redeemId = createRequestId();
+  const old = (await app.redeem(owner.cookie, code, 'line-row-1', { requestId: redeemId })).value.customer;
+  const resetId = createRequestId();
+  assert.equal((await app.reset(owner.cookie, old, { requestId: resetId })).status, 200);
+  for (const cardVersion of [undefined, 0]) {
+    assert.equal((await app.stamp(owner.cookie, code, ['maki'], { cardVersion })).status, 409);
+    assert.equal((await app.stamp(owner.cookie, code, categories.slice(0, 4), { cardVersion, requestId: awardId })).status, 409);
+    assert.equal((await app.request('/api/owner/stamps/remove', { method: 'POST', cookie: owner.cookie, body: { ...removal, cardVersion } })).status, 409);
+    assert.equal((await app.redeem(owner.cookie, code, 'line-row-1', { cardVersion, requestId: redeemId })).status, 409);
+  }
+  const fresh = (await app.stamp(owner.cookie, code, categories.slice(0, 4), { cardVersion: 1 })).value.customer;
+  const retried = await app.reset(owner.cookie, old, { requestId: resetId });
+  assert.equal(retried.status, 200);assert.equal(retried.value.repeated, true);
+  assert.deepEqual(retried.value.customer.stamps, fresh.stamps);
+  assert.equal((await app.stamp(owner.cookie, code, categories.slice(0, 4), { cardVersion: 1, requestId: awardId })).status, 409);
+  assert.equal((await app.redeem(owner.cookie, code, 'line-row-1', { cardVersion: 1, requestId: redeemId })).status, 409);
+  await app.store.transaction(state => { delete state.requests[redeemId];delete state.requests[resetId]; });
+  // Permanent archived receipts also prevent re-use if temporary receipts vanish.
+  assert.equal((await app.redeem(owner.cookie, code, 'line-row-1', { cardVersion: 1, requestId: redeemId })).status, 409);
+  assert.equal((await app.reset(owner.cookie, old, { requestId: resetId })).value.repeated, true);
+  assert.equal((await app.reset(owner.cookie, fresh, { requestId: resetId })).status, 409);
+  const [one, two] = await Promise.all([app.reset(owner.cookie, fresh), app.reset(owner.cookie, fresh)]);
+  assert.deepEqual([one.status, two.status].sort(), [200, 409]);
+  assert.equal((await app.reset(owner.cookie, old, { requestId: resetId })).status, 409);
+  assert.equal((await app.stamp(owner.cookie, code, ['maki'], { cardVersion: 1 })).status, 409);
+  const stored = await app.store.read(state => state.customers[id]);
+  assert.equal(stored.cardVersion, 2);assert.equal(stored.cardHistory.length, 2);
+  assert.deepEqual(stored.stamps, {});
+});
 
 test('customers have unique public QR identities and cannot access or award other passports', async (t) => {
   const app = await fixture(t);

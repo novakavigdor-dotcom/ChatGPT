@@ -36,7 +36,7 @@ function publicCustomer(customer) {
   const redeemed = redemptions.length > 0;
   const redeemedDiscount = redeemed ? redemptions.at(-1).discount : 0;
   const needsProfile = !firstName || !lastName || !email;
-  return { id, code, version, firstName, lastName, email, name, needsProfile, stamps: { ...stamps }, directOrders, orders: structuredClone(orders), corrections: structuredClone(customer.corrections || []), redemptions, rewards: getRewardStatus(customer), redeemed, redeemedDiscount, bingo: getBingoStatus(stamps) };
+  return { id, code, version, cardVersion: customer.cardVersion ?? 0, firstName, lastName, email, name, needsProfile, stamps: { ...stamps }, directOrders, orders: structuredClone(orders), corrections: structuredClone(customer.corrections || []), redemptions, rewards: getRewardStatus(customer), redeemed, redeemedDiscount, bingo: getBingoStatus(stamps) };
 }
 function findCustomer(state, code) {
   const customer = Object.values(state.customers).find((entry) => entry.code === code);
@@ -66,11 +66,37 @@ function requestIdentity(state, raw) {
   }
   return { id, previous };
 }
+function requireCardVersion(customer, supplied) {
+  const current = customer.cardVersion ?? 0;
+  // Old clients may finish the original card, but cannot change a replacement.
+  if (supplied === undefined && current === 0) return current;
+  if (supplied === undefined) fail(409, 'This bingo card has been reset. Reload the customer before making another change.');
+  if (!Number.isSafeInteger(supplied) || supplied < 0) fail(400, 'Include a valid bingo card version.');
+  if (supplied !== current) fail(409, 'This bingo card has changed. Reload the customer before making another change.');
+  return current;
+}
+function cardFingerprint(value, cardVersion) {
+  // Preserve original fingerprints so saved version-zero receipts still replay.
+  return digest(JSON.stringify({ ...value, ...(cardVersion ? { cardVersion } : {}) }));
+}
+function snapshotJSON(value) {
+  if (Array.isArray(value)) return `[${value.map(snapshotJSON).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${snapshotJSON(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
+function recordedRedemption(customer, requestId) {
+  for (const card of [customer, ...(customer.cardHistory || [])]) {
+    const redemption = getRedemptions(card).find((entry) => entry.id === requestId);
+    if (redemption) return { redemption, cardVersion: card.cardVersion ?? 0 };
+  }
+  return null;
+}
 function applyProfile(state, customer, profile) {
   if (Object.values(state.customers).some((entry) => entry.id !== customer.id && entry.email === profile.email)) fail(409, 'Unable to create this account. If you registered before, sign in with your last name and email.');
   Object.assign(customer, profile);
 }
 function migrateCustomer(customer) {
+  customer.cardVersion ??= 0;
   const redemptions = getRedemptions(customer);
   // A warm older function can still record a real aggregate-line or blackout
   // redemption after private history exists. Keep those durable UUID entries,
@@ -267,7 +293,7 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
           return { payload: { customer: publicCustomer(customer) } };
         } catch (error) { if (error.status !== 401) throw error; }
         const id = randomUUID();
-        const customer = { id, code: randomBytes(16).toString('hex').toUpperCase(), version: 3, stamps: {}, directOrders: 0, orders: [], corrections: [], redemptions: [], rewardHistory: [], redeemed: false, redeemedDiscount: 0 };
+        const customer = { id, code: randomBytes(16).toString('hex').toUpperCase(), version: 3, cardVersion: 0, stamps: {}, directOrders: 0, orders: [], corrections: [], redemptions: [], rewardHistory: [], redeemed: false, redeemedDiscount: 0 };
         applyProfile(state, customer, profile);
         state.customers[id] = customer;
         return { cookie: newSessionCookie(state, request, 'customer', id, secureCookies), payload: { customer: publicCustomer(customer) } };
@@ -342,13 +368,14 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       if (typeof body.directOrder !== 'boolean') fail(400, 'Specify whether this was a direct order.');
       const { id: requestId, previous } = requestIdentity(state, body.requestId);
       const categories = [...new Set(body.categories)].sort();
-      const fingerprint = digest(JSON.stringify({ operation: 'award', code, categories, directOrder: body.directOrder }));
-      if (previous) {
-        const legacyFingerprint = !previous.operation && digest(JSON.stringify({ code, categories, directOrder: body.directOrder }));
-        if (previous.fingerprint !== fingerprint && previous.fingerprint !== legacyFingerprint) fail(409, 'This request ID was already used for a different visit.');
-        return { customer: publicCustomer(findCustomer(state, code)), earned: previous.earned, repeated: true };
-      }
       const customer = findCustomer(state, code);
+      const cardVersion = requireCardVersion(customer, body.cardVersion);
+      const fingerprint = cardFingerprint({ operation: 'award', code, categories, directOrder: body.directOrder }, cardVersion);
+      if (previous) {
+        const legacyFingerprint = cardVersion === 0 && !previous.operation && digest(JSON.stringify({ code, categories, directOrder: body.directOrder }));
+        if (previous.fingerprint !== fingerprint && previous.fingerprint !== legacyFingerprint) fail(409, 'This request ID was already used for a different visit.');
+        return { customer: publicCustomer(customer), earned: previous.earned, repeated: true };
+      }
       // Distinct visits need distinct dates so a stale correction cannot remove
       // a legitimate re-award that happened within the same clock millisecond.
       const previousVisit = Date.parse(customer.orders[0]?.date);
@@ -360,7 +387,7 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
         customer.orders.unshift({ id: randomUUID(), date, total: 0, categories, directOrder: body.directOrder });
         customer.orders = customer.orders.slice(0, 50);
       }
-      state.requests[requestId] = { operation: 'award', fingerprint, earned, date };
+      state.requests[requestId] = { operation: 'award', cardVersion, fingerprint, earned, date };
       return { customer: publicCustomer(customer), earned };
     }));
     if (route === 'POST /api/owner/stamps/remove') return json(response, await store.transaction((state) => {
@@ -372,12 +399,13 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       const expected = body.expectedStamps;
       if (!expected || typeof expected !== 'object' || Array.isArray(expected) || categories.some((category) => !Object.hasOwn(expected, category) || typeof expected[category] !== 'string' || Number.isNaN(Date.parse(expected[category])))) fail(400, 'Include the original stamp date for each category being corrected.');
       const expectedStamps = Object.fromEntries(categories.map((category) => [category, expected[category]]));
-      const fingerprint = digest(JSON.stringify({ operation: 'remove', code, categories, expectedStamps }));
+      const customer = findCustomer(state, code);
+      const cardVersion = requireCardVersion(customer, body.cardVersion);
+      const fingerprint = cardFingerprint({ operation: 'remove', code, categories, expectedStamps }, cardVersion);
       if (previous) {
         if (previous.operation !== 'remove' || previous.fingerprint !== fingerprint) fail(409, 'This request ID was already used for a different change.');
-        return { customer: publicCustomer(findCustomer(state, code)), removed: previous.removed, repeated: true };
+        return { customer: publicCustomer(customer), removed: previous.removed, repeated: true };
       }
-      const customer = findCustomer(state, code);
       if (categories.some((category) => customer.stamps[category] && customer.stamps[category] !== expectedStamps[category])) fail(409, 'A selected stamp has changed. Reload this customer before correcting it.');
       const removed = categories.filter((category) => customer.stamps[category]);
       const previousStamps = Object.fromEntries(removed.map((category) => [category, customer.stamps[category]]));
@@ -385,9 +413,9 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       const date = new Date().toISOString();
       if (removed.length) {
         customer.corrections ||= [];
-        customer.corrections.push({ id: requestId, date, categories: removed, previousStamps, actor: 'owner' });
+        customer.corrections.push({ id: requestId, date, cardVersion, categories: removed, previousStamps, actor: 'owner' });
       }
-      state.requests[requestId] = { operation: 'remove', fingerprint, removed, date };
+      state.requests[requestId] = { operation: 'remove', cardVersion, fingerprint, removed, date };
       return { customer: publicCustomer(customer), removed };
     }));
     if (route === 'POST /api/owner/redeem') return json(response, await store.transaction((state) => {
@@ -399,20 +427,21 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       // A stale client must refresh rather than select an arbitrary new line.
       if (rewardId !== 'first-line' && !BINGO_REWARDS.some((reward) => reward.id === rewardId)) fail(400, 'Choose a valid bingo reward.');
       const { id: requestId, previous } = requestIdentity(state, body.requestId);
-      const fingerprint = digest(JSON.stringify({ operation: 'redeem', code, rewardId }));
+      const customer = findCustomer(state, code);
+      const cardVersion = requireCardVersion(customer, body.cardVersion);
+      const fingerprint = cardFingerprint({ operation: 'redeem', code, rewardId }, cardVersion);
       if (previous) {
         if (previous.operation !== 'redeem' || previous.fingerprint !== fingerprint) fail(409, 'This request ID was already used for a different change.');
-        return { customer: publicCustomer(findCustomer(state, code)), redemption: structuredClone(previous.redemption), repeated: true };
+        return { customer: publicCustomer(customer), redemption: structuredClone(previous.redemption), repeated: true };
       }
       if (rewardId === 'first-line') fail(409, 'Refresh this page to choose the specific completed line before redeeming it.');
-      const customer = findCustomer(state, code);
       // The permanent ledger outlives request receipt pruning. A request UUID
       // can never consume a second reward, including on a different customer.
       for (const entry of Object.values(state.customers)) {
-        const recorded = getRedemptions(entry).find((redemption) => redemption.id === requestId);
+        const recorded = recordedRedemption(entry, requestId);
         if (!recorded) continue;
-        if (entry.id !== customer.id || recorded.rewardId !== rewardId) fail(409, 'This request ID was already used for a different change.');
-        return { customer: publicCustomer(customer), redemption: structuredClone(recorded), repeated: true };
+        if (entry.id !== customer.id || recorded.cardVersion !== cardVersion || recorded.redemption.rewardId !== rewardId) fail(409, 'This request ID was already used for a different change.');
+        return { customer: publicCustomer(customer), redemption: structuredClone(recorded.redemption), repeated: true };
       }
       const rewards = getRewardStatus(customer);
       const reward = rewards.availableRewards.find((entry) => entry.id === rewardId);
@@ -430,8 +459,47 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       customer.redeemed = true;
       customer.redeemedDiscount = reward.discount;
       customer.redeemedAt = date;
-      state.requests[requestId] = { operation: 'redeem', fingerprint, redemption: { ...redemption }, date };
+      state.requests[requestId] = { operation: 'redeem', cardVersion, fingerprint, redemption: { ...redemption }, date };
       return { customer: publicCustomer(customer), redemption };
+    }));
+    if (route === 'POST /api/owner/card/reset') return json(response, await store.transaction((state) => {
+      session(state, request, 'owner');
+      const code = normalizeCode(body.code);
+      if (!Number.isSafeInteger(body.cardVersion) || body.cardVersion < 0 || body.cardVersion >= Number.MAX_SAFE_INTEGER) fail(400, 'Include the bingo card version being reset.');
+      const expected = body.expectedStamps;
+      if (!expected || typeof expected !== 'object' || Array.isArray(expected) || Object.entries(expected).some(([key, value]) => !categoryIds.includes(key) || typeof value !== 'string' || Number.isNaN(Date.parse(value)))) fail(400, 'Include the current bingo stamps before resetting the card.');
+      if (!Array.isArray(body.expectedRedemptions)) fail(400, 'Include the current reward history before resetting the card.');
+      const { id: requestId, previous } = requestIdentity(state, body.requestId);
+      const customer = findCustomer(state, code);
+      const fingerprint = digest(snapshotJSON({ operation: 'reset', code, cardVersion: body.cardVersion, expectedStamps: expected, expectedRedemptions: body.expectedRedemptions }));
+      const history = customer.cardHistory || [];
+      const savedReset = history.find((card) => card.resetId === requestId);
+      if (previous || savedReset) {
+        if ((previous && (previous.operation !== 'reset' || previous.fingerprint !== fingerprint)) || (savedReset && savedReset.resetFingerprint !== fingerprint)) fail(409, 'This request ID was already used for a different change.');
+        if (customer.cardVersion !== body.cardVersion + 1) fail(409, 'A newer bingo card is already active. Reload the customer before making another change.');
+        return { customer: publicCustomer(customer), repeated: true };
+      }
+      requireCardVersion(customer, body.cardVersion);
+      // Check every stamp and reward inside the same durable transaction as reset.
+      if (snapshotJSON(customer.stamps) !== snapshotJSON(expected) || snapshotJSON(getRedemptions(customer)) !== snapshotJSON(body.expectedRedemptions)) fail(409, 'This bingo card has changed. Reload it and review the stamps and rewards before resetting.');
+      for (const entry of Object.values(state.customers)) {
+        if ((entry.cardHistory || []).some((card) => card.resetId === requestId) || recordedRedemption(entry, requestId)) fail(409, 'This request ID was already used for a different change.');
+      }
+      const date = new Date().toISOString();
+      customer.cardHistory = [...history, {
+        cardVersion: customer.cardVersion, resetId: requestId, resetFingerprint: fingerprint, resetAt: date, actor: 'owner',
+        stamps: { ...customer.stamps }, redemptions: getRedemptions(customer), rewardHistory: structuredClone(customer.rewardHistory || []),
+        redeemed: customer.redeemed, redeemedDiscount: customer.redeemedDiscount, ...(customer.redeemedAt ? { redeemedAt: customer.redeemedAt } : {}),
+      }];
+      customer.cardVersion += 1;
+      customer.stamps = {};
+      customer.redemptions = [];
+      customer.rewardHistory = [];
+      customer.redeemed = false;
+      customer.redeemedDiscount = 0;
+      delete customer.redeemedAt;
+      state.requests[requestId] = { operation: 'reset', fingerprint, cardVersion: body.cardVersion, nextCardVersion: customer.cardVersion, date };
+      return { customer: publicCustomer(customer) };
     }));
     fail(404, 'This API endpoint was not found.');
   }

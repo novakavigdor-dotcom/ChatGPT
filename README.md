@@ -29,6 +29,8 @@ The public QR code identifies the customer's bingo card to staff; it does not si
 
 Green squares in the owner's purchase view are saved stamps; red squares are selections for the current purchase. To correct a mistaken stamp, open the customer's card and choose **Correct stamps** above the grid or **Correct saved stamps** beneath it. Confirm or untick any red purchase selections first. In correction mode, untick the mistaken saved squares. Choose **Remove N stamps**, review the warning, then choose **Confirm removal**. Nothing changes until confirmation. If another staff member changed the card, choose **Reload bingo** and review the current stamps before retrying. The customer sees the corrected card automatically. Corrections preserve visit and redemption history. Removing or re-adding stamps does not reset a used reward. An unused reward is available only while its qualifying line or full card is complete.
 
+To start a fresh card for one customer, open their bingo in the owner workspace and choose **Reset card**. Review the confirmation, then choose **Confirm reset**. This clears that card’s stamps and used-discount status for a new card. The customer keeps their account and personal QR code; previous card and redemption records remain in private history. A changed card must be reloaded before it can be reset. Customers cannot reset their own cards.
+
 Phone camera scanning requires HTTPS and camera permission. Manual customer-code entry works when scanning is unavailable. Owner and customer devices must use the same deployed site.
 
 ## If the Owner button or signup does not work

@@ -1,18 +1,20 @@
 import {CATEGORIES,BOARD_CELLS,BINGO_REWARDS,emptyPassport,normalizePassport,getBingoStatus,getRewardStatus,redeemReward} from './loyalty.js';
 import {renderQr} from './qr.js';
 import {mountOwner} from './owner.js';
+import {requestTime,REQUEST_MAX_AGE_MS,FUTURE_SKEW_MS} from './request-id.js';
 
 const $=id=>document.getElementById(id),main=$('main'),modal=$('modal');
 const icon=name=>`<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const offline=document.querySelector('meta[name="umami-mode"]')?.content==='offline'||!['http:','https:'].includes(location.protocol),STORAGE='umami-bingo-demo-v2';
 let state=emptyPassport(),identity=null,role=location.pathname.replace(/\/$/,'')==='/owner'||location.hash==='#owner'?'owner':'customer';
+let offlineCardHistory=[];
 let ownerCleanup=null,pollBusy=false,pollTimer=null,syncStatus=offline?'offline':'connecting',toastTimer,formBusy=false,modalKind='',serverError='';
 const registered=()=>Boolean(identity&&!state.needsProfile);
 function randomCode(){return [...crypto.getRandomValues(new Uint8Array(16))].map(n=>n.toString(16).padStart(2,'0')).join('').toUpperCase();}
 function acceptCustomer(customer){identity={id:customer.id,code:customer.code};state=normalizePassport(customer);syncStatus=offline?'offline':'connected';}
-function loadOffline(){try{const value=JSON.parse(localStorage.getItem(STORAGE));if(value?.identity){identity=value.identity;state=normalizePassport(value.customer);}}catch{}}
-function saveOffline(){if(!offline)return;try{localStorage.setItem(STORAGE,JSON.stringify({identity,customer:state}));}catch{toast('Browser storage is unavailable. Keep this tab open to retain this demo.');}}
+function loadOffline(){try{const value=JSON.parse(localStorage.getItem(STORAGE));if(value?.identity){identity=value.identity;state=normalizePassport(value.customer);offlineCardHistory=Array.isArray(value.cardHistory)?value.cardHistory:[];}}catch{}}
+function saveOffline(){if(!offline)return;try{localStorage.setItem(STORAGE,JSON.stringify({identity,customer:state,cardHistory:offlineCardHistory}));}catch{toast('Browser storage is unavailable. Keep this tab open to retain this demo.');}}
 function publicOffline(){return {...state,id:identity?.id,code:identity?.code};}
 const cleanCode=value=>String(value||'').replace(/^UMAMI\s*:/i,'').replace(/[\s-]/g,'').toUpperCase();
 async function offlineApi(path,options={}){
@@ -37,6 +39,22 @@ async function offlineApi(path,options={}){
   if(path==='/api/customer'){if(!registered()){const error=new Error('Create your bingo account first.');error.status=401;throw error;}return {customer:publicOffline()};}
   if(path.startsWith('/api/owner/customers?')){const query=(new URL(path,'https://umami.local').searchParams.get('q')||'').trim().normalize('NFKC').toLowerCase();if(query.length<2||query.length>120)throw new Error('Enter between 2 and 120 characters to search.');const matches=registered()&&[state.name,state.email].some(value=>value.normalize('NFKC').toLowerCase().includes(query));return {customers:matches?[publicOffline()]:[]};}
   if(path.startsWith('/api/owner/customer?')){const code=new URL(path,'https://umami.local').searchParams.get('code');if(!registered()||cleanCode(code)!==identity.code)throw new Error('This offline demo can find only the bingo card in this browser.');return {customer:publicOffline()};}
+  if(path==='/api/owner/card/reset'){
+    if(cleanCode(body.code)!==identity?.code)throw new Error('Bingo account not found.');
+    const reject=(message,status=409)=>{const error=new Error(message);error.status=status;throw error;};
+    const canonical=value=>JSON.stringify(value,(_key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.entries(item).sort(([a],[b])=>a.localeCompare(b))):item);
+    if(!Number.isSafeInteger(body.cardVersion)||body.cardVersion<0||!body.expectedStamps||typeof body.expectedStamps!=='object'||Array.isArray(body.expectedStamps)||!Array.isArray(body.expectedRedemptions))reject('Reload the card before resetting it.',400);
+    const requestId=typeof body.requestId==='string'?body.requestId.toLowerCase():'';
+    const fingerprint=canonical({code:body.code,cardVersion:body.cardVersion,expectedStamps:body.expectedStamps,expectedRedemptions:body.expectedRedemptions});
+    const previous=offlineCardHistory.find(entry=>entry.requestId===requestId);
+    if(previous){if(previous.fingerprint!==fingerprint||state.cardVersion!==previous.nextCardVersion)reject('This card has already changed. Reload it before continuing.');return {customer:publicOffline(),repeated:true};}
+    const timestamp=requestTime(requestId);
+    if(timestamp===null||timestamp-Date.now()>FUTURE_SKEW_MS||Date.now()-timestamp>REQUEST_MAX_AGE_MS)reject('This reset request is no longer valid. Reload the card.',400);
+    if(body.cardVersion!==state.cardVersion||canonical(body.expectedStamps)!==canonical(state.stamps)||canonical(body.expectedRedemptions)!==canonical(state.redemptions))reject('This card changed. Reload it and review it before resetting.');
+    offlineCardHistory.push({requestId,fingerprint,nextCardVersion:state.cardVersion+1,date:new Date().toISOString(),card:structuredClone(state)});
+    state={...state,cardVersion:state.cardVersion+1,stamps:{},redemptions:[],redeemed:false,redeemedDiscount:0};saveOffline();return {customer:publicOffline()};
+  }
+  if(['/api/owner/stamps','/api/owner/stamps/remove','/api/owner/redeem'].includes(path)&&(body.cardVersion??0)!==state.cardVersion){const error=new Error('This card was reset. Reload it before making another change.');error.status=409;throw error;}
   if(path==='/api/owner/stamps'){
     if(cleanCode(body.code)!==identity?.code)throw new Error('Bingo account not found.');
     const selected=[...new Set(body.categories||[])];if(!selected.length||selected.some(id=>!CATEGORIES.some(c=>c.id===id)))throw new Error('Select a valid food square.');

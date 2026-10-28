@@ -103,9 +103,10 @@ export function getRewardStatus(value){
   return {availableRewards,usedRewards,redemptions,legacyUnknown,count:redemptions.length,lines};
 }
 
-export function emptyPassport(){return {version:3,firstName:'',lastName:'',email:'',name:'',needsProfile:true,stamps:{},orders:[],redemptions:[],redeemed:false,redeemedDiscount:0};}
+export function emptyPassport(){return {version:3,cardVersion:0,firstName:'',lastName:'',email:'',name:'',needsProfile:true,stamps:{},orders:[],redemptions:[],redeemed:false,redeemedDiscount:0};}
 export function normalizePassport(value){
   const clean=emptyPassport();if(!value||typeof value!=='object')return clean;
+  if(Number.isSafeInteger(value.cardVersion)&&value.cardVersion>=0)clean.cardVersion=value.cardVersion;
   for(const key of ['firstName','lastName'])if(typeof value[key]==='string')clean[key]=value[key].slice(0,60);
   if(typeof value.email==='string')clean.email=value.email.slice(0,254);
   clean.name=[clean.firstName,clean.lastName].filter(Boolean).join(' ')||(typeof value.name==='string'?value.name.slice(0,121):'');
