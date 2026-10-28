@@ -10,11 +10,20 @@ const fullCard=()=>stamps(CATEGORIES.map(category=>category.id));
 const redeem=(value,rewardId,requestId=createRequestId())=>redeemReward(value,rewardId,{requestId,date});
 const available=value=>getRewardStatus(value).availableRewards.map(reward=>reward.id);
 
-test('4x4 board follows all sixteen food squares from the PDF with no free square',()=>{
+test('4x4 board keeps all sixteen food squares and the renamed Sushi Burrito stamp history',()=>{
   assert.equal(CATEGORIES.length,16);assert.equal(BOARD_CELLS.length,16);
   assert.equal(BOARD_CELLS.some(cell=>cell.free),false);
   assert.equal(getBingoStatus({}).discount,0);assert.equal(getBingoStatus({free:date}).count,0);
   assert.deepEqual(BOARD_CELLS.slice(0,4).map(cell=>cell.id),['maki','poke','gyoza','sushi-pizza']);
+  assert.equal(BOARD_CELLS[8].name,'Sushi Burrito');
+  assert.equal(BOARD_CELLS[8].id,'nigiri');
+  const existingCard=normalizePassport({version:3,stamps:stamps(['nigiri','sandwich','salad','soba'])});
+  assert.equal(existingCard.stamps.nigiri,date);
+  assert.deepEqual(available(existingCard),['line-row-3']);
+  const used=normalizePassport(redeem(existingCard,'line-row-3'));
+  assert.equal(used.stamps.nigiri,date);
+  assert.deepEqual(available(used),[]);
+  assert.equal(getRewardStatus(used).usedRewards[0].id,'line-row-3');
 });
 
 test('all four rows, four columns and two diagonals require four stamps for ten percent',()=>{

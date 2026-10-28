@@ -7,7 +7,8 @@ export const CATEGORIES = [
   {id:'onigiri',name:'Onigiri',description:'3 Options',icon:'onigiri'},
   {id:'udon',name:'Udon Noodle',description:'3 Options',icon:'ramen'},
   {id:'miso',name:'Miso Soup',description:'',icon:'ramen'},
-  {id:'nigiri',name:'Nigiri',description:'Your choice',icon:'maki'},
+  // Retain the historical key so existing stamps and line rewards stay attached.
+  {id:'nigiri',name:'Sushi Burrito',description:'Your choice',icon:'maki'},
   {id:'sandwich',name:'Sushi Sandwich',description:'2 Sizes',icon:'onigiri'},
   {id:'salad',name:'Salad',description:'Green, Arame, Wakame',icon:'leaf'},
   {id:'soba',name:'Soba Noodle',description:'',icon:'ramen'},
