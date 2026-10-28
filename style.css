@@ -24,9 +24,9 @@ body.signup-open:after{content:'';position:fixed;inset:0;z-index:40;background:#
 .passport-page.bingo-page{display:block;max-width:1060px;margin:0 auto}
 .menu-bingo.paper-passport{display:block;grid-column:auto;grid-row:auto;padding:0;border:1px solid #d7d0c5;border-radius:0;background:#f8f6ef;box-shadow:0 8px 30px #35231c08;overflow:hidden}
 .bingo-masthead{background:#171717;text-align:center;padding:18px 20px 15px;color:#fff}
-.bingo-masthead img{width:145px;max-width:45%;height:auto;display:block;margin:0 auto 4px}
-.bingo-masthead h1{font:850 39px/1.1 var(--sans);letter-spacing:1.7px;margin:8px 0 0;color:#fff}
-.bingo-tagline{text-align:center;font-size:15px;line-height:1.6;color:#272727;margin:16px 24px 0}
+.bingo-masthead img{width:240px;max-width:45%;height:auto;display:block;margin:0 auto 4px}
+.bingo-masthead h1{font:900 clamp(36px,6.5vw,80px)/1.05 var(--sans);letter-spacing:-1.5px;margin:8px 0 0;color:#fff}
+.bingo-tagline{text-align:center;font-size:clamp(20px,3.8vw,44px);font-weight:850;letter-spacing:-1.1px;line-height:1.08;color:#080908;margin:16px 20px 0}
 .bingo-identity{display:flex;align-items:center;gap:24px;margin:9px 28px 15px}
 .bingo-identity .passport-name{margin:0;flex:1;min-width:0;font-size:14px}
 .bingo-identity .passport-name b{font-size:13px;color:#242424}
@@ -53,13 +53,14 @@ body.signup-open:after{content:'';position:fixed;inset:0;z-index:40;background:#
 .menu-bingo .bingo-square>small{font-size:8px;bottom:7px;left:7px;letter-spacing:1px;color:#38734f;font-weight:800;z-index:4}
 .menu-bingo .stamp-ring{height:auto;width:78%;max-width:190px;aspect-ratio:1;left:50%;right:auto;top:50%;transform:translate(-50%,-50%) rotate(-13deg);opacity:.9;border:4px solid #912736;box-shadow:inset 0 0 0 2px #91273655;background:transparent;color:#912736;z-index:6;pointer-events:none}
 .menu-bingo .stamp-ring>span{font-size:clamp(11px,1.4vw,19px);font-weight:900;letter-spacing:1px}.menu-bingo .stamp-ring>b{font-size:clamp(26px,3vw,40px);font-weight:800}
-.pdf-reward-strip{background:#bb232c;border-radius:8px;text-align:center;color:#fff;padding:16px 15px;margin:20px 20px 0}
-.pdf-reward-strip strong{font-size:26px;font-weight:850;line-height:1.4;display:block;letter-spacing:.3px}
-.pdf-reward-strip b{font-size:23px;font-weight:800;line-height:1.5;display:block}
+.pdf-reward-strip{background:#a30d1b;border-radius:12px;text-align:center;color:#fff;padding:16px 15px;margin:20px 20px 0}
+.pdf-reward-strip strong{font-size:clamp(18px,3.8vw,44px);font-weight:900;line-height:1.15;display:block;letter-spacing:.3px}
+.pdf-reward-strip b{font-size:clamp(18px,3.8vw,44px);font-weight:900;line-height:1.15;display:block}
 .bingo-rules{text-align:center;padding:0 28px}
-.bingo-rules>p{font-size:15px;color:#292929;margin:16px 0 11px;line-height:1.7}
-.bingo-rules>small{display:block;font-size:12px;color:#514b46;line-height:1.8}
-.bingo-rules>a{display:block;color:#b32630;font-size:19px;font-weight:750;text-decoration:none;margin:18px auto 5px}
+.bingo-rules>p{font-size:15px;color:#292929;margin:10px 0 0;line-height:1.4}
+.bingo-rules>small{display:block;font-size:15px;color:#292929;line-height:1.4}
+.bingo-rules>small>span{display:block}
+.bingo-rules>a{display:block;color:#a30d1b;font-size:36px;font-weight:850;text-decoration:none;margin:4px auto 5px}
 .menu-bingo .card-bottom{margin:0 20px;padding:15px 0 16px;color:#757365;font-size:9px}
 .menu-bingo .bingo-result{margin:20px 20px 0;border-radius:7px;padding:13px 20px}
 .menu-bingo .bingo-result h2{font-size:17px}.menu-bingo .bingo-result p{font-size:11px}
@@ -68,18 +69,18 @@ body.signup-open:after{content:'';position:fixed;inset:0;z-index:40;background:#
 .bingo-account-row .account-link{margin:0;font-size:10px;display:block;width:auto;text-align:right}
 .bingo-account-row .secondary{font-size:11px;background:#fffdf7;border-color:#d7d2c6}
 @media(max-width:850px){
-  .bingo-masthead h1{font-size:34px}
+  .bingo-masthead h1{font-size:clamp(36px,7.5vw,64px)}
   .menu-bingo .bingo-grid{margin:0 16px;border-width:2px}
   .menu-bingo .bingo-square{border-right-width:2px;border-bottom-width:2px;padding:9px 5px 8px}
   .menu-bingo .bingo-square strong{font-size:22px;letter-spacing:-.8px}
   .menu-bingo .square-description{font-size:12px}
-  .pdf-reward-strip strong{font-size:22px}.pdf-reward-strip b{font-size:20px}
+  .pdf-reward-strip strong,.pdf-reward-strip b{font-size:clamp(18px,4vw,32px)}
 }
 @media(max-width:560px){
   .bingo-masthead{padding:13px 12px 12px}
-  .bingo-masthead img{width:115px;max-width:43%;margin-bottom:3px}
-  .bingo-masthead h1{font-size:26px;letter-spacing:1.5px;margin-top:6px}
-  .bingo-tagline{font-size:10px;line-height:1.6;margin:11px 10px 0}
+  .bingo-masthead img{width:150px;max-width:43%;margin-bottom:3px}
+  .bingo-masthead h1{font-size:36px;letter-spacing:-.8px;margin-top:6px}
+  .bingo-tagline{font-size:clamp(18px,4.7vw,26px);line-height:1.12;letter-spacing:-.6px;margin:11px 8px 0}
   .bingo-identity{margin:8px 11px 12px;gap:8px}
   .bingo-identity .passport-name{font-size:11px;gap:5px;align-items:center}
   .bingo-identity .passport-name b{font-size:9px}
@@ -99,12 +100,12 @@ body.signup-open:after{content:'';position:fixed;inset:0;z-index:40;background:#
   .menu-bingo .stamp-ring{width:78%;height:auto;left:50%;right:auto;top:50%;opacity:.9;border-width:3px;box-shadow:inset 0 0 0 1px #91273655}
   .menu-bingo .stamp-ring>span{font-size:9px;letter-spacing:.4px}.menu-bingo .stamp-ring>b{font-size:21px}
   .pdf-reward-strip{margin:14px 10px 0;padding:12px 7px;border-radius:6px}
-  .pdf-reward-strip strong{font-size:13px;letter-spacing:0;line-height:1.5}
-  .pdf-reward-strip b{font-size:12px;line-height:1.6}
+  .pdf-reward-strip strong{font-size:clamp(14px,3.5vw,19px);letter-spacing:0;line-height:1.2}
+  .pdf-reward-strip b{font-size:clamp(14px,3.5vw,19px);line-height:1.2}
   .bingo-rules{padding:0 12px}
-  .bingo-rules>p{font-size:10px;line-height:1.7;margin:12px 0 8px}
-  .bingo-rules>small{font-size:9px;line-height:1.7}
-  .bingo-rules>a{font-size:15px;margin:13px auto 2px}
+  .bingo-rules>p{font-size:10px;line-height:1.5;margin:8px 0 0}
+  .bingo-rules>small{font-size:10px;line-height:1.5}
+  .bingo-rules>a{font-size:23px;margin:4px auto 2px}
   .menu-bingo .card-bottom{margin:0 11px;padding:12px 0;font-size:7px}
   .menu-bingo .card-bottom button{font-size:7px}
   .menu-bingo .bingo-result{margin:13px 10px 0;padding:11px 12px}
