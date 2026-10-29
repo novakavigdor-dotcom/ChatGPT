@@ -69,6 +69,32 @@ test('Netlify requests share durable customer and owner state through the HTTP a
   assert.equal(blocked.status, 403);
 });
 
+test('Netlify owner directory paginates every account without exposing private customer state', async () => {
+  const password = 'test-directory-password-only';
+  const api = fixture({ password });
+  assert.equal((await api.request('/api/owner/accounts?limit=bad')).status, 401);
+  const owner = await api.request('/api/owner/login', { method: 'POST', body: { password } });
+  const empty = await api.request('/.netlify/functions/api/owner/accounts', { cookie: owner.cookie });
+  assert.deepEqual(empty.value, { accounts: [], total: 0, nextOffset: null });
+  let customer;
+  for (let index = 51; index >= 0; index -= 1) {
+    customer = await api.request('/api/customer', { method: 'POST', body: { firstName: `Account ${String(index).padStart(2, '0')}`, lastName: 'Guest', email: `directory-${index}@example.test` } });
+    assert.equal(customer.status, 201);
+  }
+  assert.equal((await api.request('/api/owner/accounts', { cookie: customer.cookie })).status, 401);
+  const first = await api.request('/.netlify/functions/api/owner/accounts', { cookie: owner.cookie });
+  assert.equal(first.status, 200);assert.equal(first.headers.get('cache-control'), 'no-store');
+  assert.equal(first.value.total, 52);assert.equal(first.value.nextOffset, 50);assert.equal(first.value.accounts.length, 50);
+  const last = await api.request('/api/owner/accounts?offset=50', { cookie: owner.cookie });
+  assert.equal(last.value.total, 52);assert.equal(last.value.nextOffset, null);assert.equal(last.value.accounts.length, 2);
+  const accounts = [...first.value.accounts, ...last.value.accounts];
+  assert.deepEqual(accounts.map(account => account.name), Array.from({ length: 52 }, (_, index) => `Account ${String(index).padStart(2, '0')} Guest`));
+  assert.equal(new Set(accounts.map(account => account.id)).size, 52);
+  for (const account of accounts) assert.deepEqual(Object.keys(account).sort(), ['code', 'email', 'id', 'name']);
+  assert.equal((await api.request('/api/owner/accounts?limit=101', { cookie: owner.cookie })).status, 400);
+  assert.equal((await api.request('/api/owner/customers', { cookie: owner.cookie })).status, 400);
+});
+
 test('Netlify card resets commit durably once and a failed write never clears stamps or rewards', async () => {
   const password = 'test-reset-password-only';
   const api = fixture({ password });

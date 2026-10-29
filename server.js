@@ -270,6 +270,17 @@ export async function createApp({ dataDir = process.env.UMAMI_DATA_DIR || defaul
       session(state, request, 'owner');
       return { customer: publicCustomer(findCustomer(state, normalizeCode(url.searchParams.get('code')))) };
     }));
+    if (route === 'GET /api/owner/accounts') return json(response, await store.read((state) => {
+      session(state, request, 'owner');
+      const offsetText = url.searchParams.get('offset') ?? '0';
+      const limitText = url.searchParams.get('limit') ?? '50';
+      const offset = Number(offsetText), limit = Number(limitText);
+      if (!/^\d+$/.test(offsetText) || !/^\d+$/.test(limitText) || !Number.isSafeInteger(offset) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail(400, 'Use a valid account page and page size.');
+      const directory = Object.values(state.customers).map(({ id, name, firstName = '', lastName = '', email = '', code }) => ({ id, name: name || [firstName, lastName].filter(Boolean).join(' '), email, code }));
+      directory.sort((a, b) => a.name.localeCompare(b.name, 'en') || a.id.localeCompare(b.id, 'en'));
+      const accounts = directory.slice(offset, offset + limit), total = directory.length;
+      return { accounts, total, nextOffset: offset + accounts.length < total ? offset + accounts.length : null };
+    }));
     if (route === 'GET /api/owner/customers') return json(response, await store.read((state) => {
       session(state, request, 'owner');
       const query = (url.searchParams.get('q') || '').trim().normalize('NFKC').toLowerCase();

@@ -24,6 +24,7 @@ function ownerReadCode(value){
 export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
   let disposed=false,authenticated=false,bootBusy=false,customer=null,scanner=null,cameraController=null,cameraStarting=false,lookupBusy=false,authBusy=false,saveBusy=false,modalCustomer=null,pendingVisit=null,correctionMode=false,pendingCorrection=null,correctionStale=false;
   let searchQuery='',searchResults=[],searchBusy=false,searchPerformed=false,searchError='',searchController=null,searchGeneration=0,ownerSessionGeneration=0,openingSearchCode='',lastScanPayload='',lastScanAttempt=0;
+  let accounts=[],accountsTotal=null,accountsNextOffset=null,accountsBusy=false,accountsLoaded=false,accountsError='',accountsOpenError='',accountsController=null,accountsGeneration=0,accountsAttemptOffset=0,openingAccountCode='';
   let pendingRedemption=null,selectedRewardId=null,redemptionNeedsReload=false,redemptionError='',rewardUsedThisReview=false;
   let resetReview=false,pendingReset=null,resetNeedsReload=false,resetError='';
   const pendingVisits=new Map(),pendingCorrections=new Map(),pendingRedemptions=new Map(),pendingResets=new Map();
@@ -52,13 +53,13 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
     dialog.addEventListener('cancel',onDialogCancel);
     dialog.addEventListener('close',()=>{
       if(disposed||dialog!==select('#owner-modal'))return;
-      stopCamera();if(!saveBusy){modalCustomer=null;clearRewardReview();clearResetReview();}
+      stopCamera();if(!saveBusy){modalCustomer=null;clearRewardReview();clearResetReview();renderAccounts();}
     });
   }
   function showError(message){const el=select('[data-ow-error]');if(el){el.textContent=message;el.hidden=!message;}}
   function showLoading(){shell(`<div class="ow-loading" role="status"><span class="ow-loading-dot"></span>Opening your owner workspace…</div>`);}
   function showAuth(){
-    authenticated=false;ownerSessionGeneration++;clearSearch();
+    authenticated=false;ownerSessionGeneration++;clearSearch();clearAccounts();
     shell(`<div class="ow-auth-layout"><div class="ow-auth-card"><span class="ow-auth-seal">${ownerIcon('lock')}</span><div class="ow-kicker">FOR THE PEOPLE BEHIND THE COUNTER</div><h2>Owner sign-in.</h2><p>Enter your owner access code. Your camera will open so you can scan a customer’s QR code and stamp their purchases.</p><form data-ow-form="auth"><label for="ow-access-code">Owner access code</label><input id="ow-access-code" name="code" type="password" inputmode="numeric" autocomplete="current-password" maxlength="256" required placeholder="Enter your access code"><p class="ow-form-error" data-ow-error role="alert" hidden></p><button type="submit" class="ow-primary">Sign in & open scanner ${ownerIcon('arrow')}</button></form><span class="ow-auth-note">${ownerIcon('lock')}Keep this code private. Customers never need it.</span></div><aside class="ow-auth-story"><div class="ow-big-seal">${ownerIcon('passport')}</div><h2>From their screen<br>to a new stamp.</h2><ol><li><b>01</b><span>Sign in and allow camera access when your browser asks.</span></li><li><b>02</b><span>Scan the customer’s QR code and choose what they ordered.</span></li><li><b>03</b><span>Confirm their stamps. Your scanner opens for the next customer.</span></li></ol></aside></div>`);
   }
   function summaryMarkup(value){
@@ -119,10 +120,66 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
       if(!disposed&&generation===searchGeneration){searchBusy=false;searchController=null;renderSearch();}
     }
   }
+  function accountsMarkup(){
+    return `<section class="ow-accounts-card" aria-labelledby="ow-accounts-heading"><div class="ow-accounts-heading"><div><div class="ow-kicker">EVERY CUSTOMER IN ONE PLACE</div><h2 id="ow-accounts-heading">Customer accounts.</h2></div><button type="button" class="ow-secondary" data-ow-action="refresh-accounts">Refresh</button></div><p class="ow-accounts-status" data-ow-accounts-status role="status" aria-live="polite"></p><ul class="ow-accounts-list" data-ow-accounts-list aria-label="Customer accounts" hidden></ul><div class="ow-accounts-actions"><button type="button" class="ow-secondary" data-ow-action="retry-accounts" hidden>Try loading accounts again</button><button type="button" class="ow-secondary" data-ow-action="more-accounts" hidden>Load more accounts ${ownerIcon('arrow')}</button></div></section>`;
+  }
+  function renderAccounts(){
+    const section=select('.ow-accounts-card');if(!section)return;
+    section.hidden=disposed||!authenticated;
+    if(section.hidden){select('[data-ow-accounts-list]').innerHTML='';return;}
+    section.setAttribute('aria-busy',String(accountsBusy));
+    const status=select('[data-ow-accounts-status]'),error=accountsError||accountsOpenError;
+    status.classList.toggle('is-error',Boolean(error));
+    status.textContent=accountsBusy?(accounts.length?'Loading more customer accounts…':'Loading customer accounts…'):error||(!accountsLoaded?'Customer accounts will appear here.':accountsTotal===0?'No customer accounts yet. Customers will appear here after they sign up.':`${accountsTotal} customer ${accountsTotal===1?'account':'accounts'} · Showing ${accounts.length} of ${accountsTotal}.`);
+    const list=select('[data-ow-accounts-list]');list.hidden=accounts.length===0;
+    list.innerHTML=accounts.map((entry,index)=>{
+      const name=ownerCustomerName(entry),email=typeof entry.email==='string'?entry.email:'';
+      return `<li><span class="ow-search-avatar" aria-hidden="true">${ownerEscape(name.charAt(0).toUpperCase())}</span><div class="ow-search-person"><h3>${ownerEscape(name)}</h3>${email?`<p>${ownerEscape(email)}</p>`:'<p>Email not added</p>'}</div><button type="button" class="ow-secondary" data-ow-action="open-account" data-ow-account-index="${index}" ${accountsBusy||lookupBusy||saveBusy?'disabled':''} aria-label="Open bingo for ${ownerEscape(name)}${email?', '+ownerEscape(email):''}">${openingAccountCode===entry.code?'Opening…':'Open bingo'}${ownerIcon('arrow')}</button></li>`;
+    }).join('');
+    const refresh=select('[data-ow-action="refresh-accounts"]');refresh.disabled=accountsBusy||lookupBusy||saveBusy;
+    const retry=select('[data-ow-action="retry-accounts"]');retry.hidden=!accountsError;retry.disabled=accountsBusy||lookupBusy||saveBusy;
+    const more=select('[data-ow-action="more-accounts"]');more.hidden=accountsNextOffset===null||Boolean(accountsError);more.disabled=accountsBusy||lookupBusy||saveBusy;
+  }
+  function clearAccounts(){
+    accountsController?.abort();accountsController=null;accountsGeneration++;
+    accounts=[];accountsTotal=null;accountsNextOffset=null;accountsBusy=false;accountsLoaded=false;accountsError='';accountsOpenError='';accountsAttemptOffset=0;openingAccountCode='';
+    renderAccounts();
+  }
+  async function loadAccounts({refresh=false}={}){
+    if(disposed||!authenticated||saveBusy||lookupBusy||accountsBusy&&!refresh)return;
+    if(refresh){clearAccounts();}
+    else if(accountsLoaded&&!accountsError&&accountsNextOffset===null)return;
+    const offset=refresh?0:accountsError?accountsAttemptOffset:accountsNextOffset??0;
+    const generation=++accountsGeneration,sessionGeneration=ownerSessionGeneration;
+    const controller=new AbortController();accountsController=controller;
+    accountsAttemptOffset=offset;accountsBusy=true;accountsError='';accountsOpenError='';renderAccounts();
+    try{
+      const result=await api(`/api/owner/accounts?offset=${offset}&limit=50`,{signal:controller.signal});
+      if(disposed||!authenticated||controller.signal.aborted||generation!==accountsGeneration||sessionGeneration!==ownerSessionGeneration)return;
+      if(!Array.isArray(result.accounts)||!Number.isSafeInteger(result.total)||result.total<0||result.nextOffset!==null&&(!Number.isSafeInteger(result.nextOffset)||result.nextOffset<=offset))throw new Error('The customer list could not be read. Please try again.');
+      const page=result.accounts.filter(entry=>entry&&typeof entry.id==='string'&&typeof entry.code==='string');
+      const combined=new Map((offset===0?[]:accounts).map(entry=>[entry.id,entry]));
+      for(const entry of page)combined.set(entry.id,entry);
+      accounts=[...combined.values()];accountsTotal=result.total;accountsNextOffset=result.nextOffset;accountsLoaded=true;
+    }catch(failure){
+      if(disposed||!authenticated||controller.signal.aborted||generation!==accountsGeneration||sessionGeneration!==ownerSessionGeneration)return;
+      if(failure?.status===401){showAuth();showError('Please sign in again to view customer accounts.');return;}
+      accountsError=`${errorText(failure)} Try loading accounts again.`;
+    }finally{
+      if(!disposed&&authenticated&&generation===accountsGeneration&&sessionGeneration===ownerSessionGeneration){accountsBusy=false;accountsController=null;renderAccounts();}
+    }
+  }
+  function openAccount(index){
+    if(disposed||!authenticated||accountsBusy||lookupBusy||saveBusy)return;
+    const entry=accounts[index];if(!entry)return;
+    openingAccountCode=entry.code;accountsOpenError='';
+    return lookup(entry.code,{source:'accounts'});
+  }
   function showDashboard(){
     authenticated=true;
-    shell(`${offline?'<div class="ow-demo-note">Offline demo: scan and stamp the customer bingo saved in this browser. To use separate phones, run the hosted app and share its secure website address.</div>':''}<div class="ow-dashboard"><section class="ow-scan-card"><div class="ow-card-heading"><div><div class="ow-kicker">ONE CUSTOMER. THEIR OWN BINGO.</div><h2>Ready when they are.</h2></div><span class="ow-step-tag">01 → 02 → 03</span></div><div class="ow-camera" data-ow-camera><video data-ow-video playsinline muted aria-label="Live camera QR scanner"></video><div class="ow-camera-idle"><div class="ow-scan-art">${ownerScanIcon}</div><h3>Point. Scan. Stamp.</h3><p>Ask the customer to open their bingo<br>and show you their QR code.</p></div><div class="ow-viewfinder" aria-hidden="true"><i></i><i></i><i></i><i></i></div><div class="ow-scanning-label">Looking for an Umami Bingo code…</div></div><div class="ow-camera-actions"><button class="ow-primary" data-ow-action="camera">${ownerScanIcon}Start scanner</button><button class="ow-quiet" data-ow-action="stop-camera" hidden>Stop camera</button><span data-ow-camera-hint>Allow camera access when your browser asks.</span></div><p class="ow-scan-feedback" data-ow-scan-feedback role="status" aria-live="polite" hidden></p><p class="ow-form-error" data-ow-camera-error role="alert" hidden></p><div class="ow-manual-divider"><span>or enter their code</span></div><form data-ow-form="lookup" class="ow-lookup-form"><label for="ow-code">CUSTOMER BINGO CODE</label><div><input id="ow-code" name="code" type="text" spellcheck="false" autocomplete="off" autocapitalize="characters" required placeholder="Paste their code or QR link" aria-describedby="ow-code-help"><button class="ow-secondary" type="submit">Look up bingo ${ownerIcon('arrow')}</button></div><small id="ow-code-help">Find the code below the QR on the customer’s screen.</small><p class="ow-form-error" data-ow-error role="alert" hidden></p></form></section><aside class="ow-how-card"><div class="ow-kicker">GOOD TASTE. A SIMPLE ROUTINE.</div><h2>Three little steps.</h2><ol><li><span>1</span><div><h3>Find their bingo.</h3><p>Scan the customer’s personal QR code, or enter their bingo code.</p></div></li><li><span>2</span><div><h3>Pick their discoveries.</h3><p>Choose every category they purchased. More than one? Tick them all.</p></div></li><li><span>3</span><div><h3>A little “okay”.</h3><p>Confirm the purchase. New stamps appear on their bingo automatically.</p></div></li></ol><div class="ow-how-note">${ownerIcon('check')}Already collected stamps stay marked. Each category counts once.</div></aside></div>${searchMarkup()}<section data-ow-last>${customer?summaryMarkup(customer):'<div class="ow-empty-recent">'+ownerIcon('passport')+'<span>Your first scan is waiting. Their next favourite is, too.</span></div>'}</section>`);
-    renderSearch();
+    shell(`${offline?'<div class="ow-demo-note">Offline demo: scan and stamp the customer bingo saved in this browser. To use separate phones, run the hosted app and share its secure website address.</div>':''}<div class="ow-dashboard"><section class="ow-scan-card"><div class="ow-card-heading"><div><div class="ow-kicker">ONE CUSTOMER. THEIR OWN BINGO.</div><h2>Ready when they are.</h2></div><span class="ow-step-tag">01 → 02 → 03</span></div><div class="ow-camera" data-ow-camera><video data-ow-video playsinline muted aria-label="Live camera QR scanner"></video><div class="ow-camera-idle"><div class="ow-scan-art">${ownerScanIcon}</div><h3>Point. Scan. Stamp.</h3><p>Ask the customer to open their bingo<br>and show you their QR code.</p></div><div class="ow-viewfinder" aria-hidden="true"><i></i><i></i><i></i><i></i></div><div class="ow-scanning-label">Looking for an Umami Bingo code…</div></div><div class="ow-camera-actions"><button class="ow-primary" data-ow-action="camera">${ownerScanIcon}Start scanner</button><button class="ow-quiet" data-ow-action="stop-camera" hidden>Stop camera</button><span data-ow-camera-hint>Allow camera access when your browser asks.</span></div><p class="ow-scan-feedback" data-ow-scan-feedback role="status" aria-live="polite" hidden></p><p class="ow-form-error" data-ow-camera-error role="alert" hidden></p><div class="ow-manual-divider"><span>or enter their code</span></div><form data-ow-form="lookup" class="ow-lookup-form"><label for="ow-code">CUSTOMER BINGO CODE</label><div><input id="ow-code" name="code" type="text" spellcheck="false" autocomplete="off" autocapitalize="characters" required placeholder="Paste their code or QR link" aria-describedby="ow-code-help"><button class="ow-secondary" type="submit">Look up bingo ${ownerIcon('arrow')}</button></div><small id="ow-code-help">Find the code below the QR on the customer’s screen.</small><p class="ow-form-error" data-ow-error role="alert" hidden></p></form></section><aside class="ow-how-card"><div class="ow-kicker">GOOD TASTE. A SIMPLE ROUTINE.</div><h2>Three little steps.</h2><ol><li><span>1</span><div><h3>Find their bingo.</h3><p>Scan the customer’s personal QR code, or enter their bingo code.</p></div></li><li><span>2</span><div><h3>Pick their discoveries.</h3><p>Choose every category they purchased. More than one? Tick them all.</p></div></li><li><span>3</span><div><h3>A little “okay”.</h3><p>Confirm the purchase. New stamps appear on their bingo automatically.</p></div></li></ol><div class="ow-how-note">${ownerIcon('check')}Already collected stamps stay marked. Each category counts once.</div></aside></div>${searchMarkup()}${accountsMarkup()}<section data-ow-last>${customer?summaryMarkup(customer):'<div class="ow-empty-recent">'+ownerIcon('passport')+'<span>Your first scan is waiting. Their next favourite is, too.</span></div>'}</section>`);
+    renderSearch();renderAccounts();
+    queueMicrotask(()=>{if(!disposed&&authenticated)loadAccounts({refresh:true});});
     if(!document.hidden)startCamera();
   }
   async function authenticate(form){
@@ -154,13 +211,13 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
     return lookup(raw,{source:'scan'});
   }
   async function lookup(value,{source='manual'}={}){
-    if(disposed||!authenticated||lookupBusy)return;
+    if(disposed||!authenticated||lookupBusy||saveBusy)return;
     const sessionGeneration=ownerSessionGeneration;
     let code;
     try{code=ownerReadCode(value);}
     catch(error){if(source==='scan')scanFeedback('That isn’t an Umami Bingo QR code. Keep the camera on the customer’s personal QR code.');else showError(errorText(error));return;}
     if(source==='scan')scanFeedback('Checking this customer’s bingo…');else showError('');
-    lookupBusy=true;renderSearch();
+    lookupBusy=true;renderSearch();renderAccounts();
     const button=select('[data-ow-form="lookup"] button');if(button){button.disabled=true;button.textContent='Finding bingo…';}
     try{
       const result=await api(`/api/owner/customer?code=${encodeURIComponent(code)}`);
@@ -172,11 +229,12 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
       const message=error?.status===404?'No customer was found for this QR code. Keep scanning, or search by name or email below.':`${errorText(error)} Try again, or search for the customer by name or email.`;
       if(source==='scan')scanFeedback(message);
       else if(source==='search'){searchError=message;renderSearch();}
+      else if(source==='accounts'){accountsOpenError=message;renderAccounts();}
       else showError(message);
     }finally{
-      lookupBusy=false;openingSearchCode='';
+      lookupBusy=false;openingSearchCode='';openingAccountCode='';
       if(button?.isConnected){button.disabled=false;button.innerHTML=`Look up bingo ${ownerIcon('arrow')}`;}
-      if(!disposed)renderSearch();
+      if(!disposed){renderSearch();renderAccounts();}
     }
   }
   function openSearchCustomer(index){
@@ -532,11 +590,11 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
     const button=event.target.closest('[data-ow-action]');if(!button||!container.contains(button))return;
     event.preventDefault();
     switch(button.dataset.owAction){
-      case'exit':if(!saveBusy){clearSearch();stopCamera();onExit();}break;
+      case'exit':if(!saveBusy){clearSearch();clearAccounts();stopCamera();onExit();}break;
       case'logout':{
-        if(saveBusy)return;clearSearch();stopCamera();authenticated=false;ownerSessionGeneration++;button.disabled=true;
+        if(saveBusy)return;clearSearch();authenticated=false;ownerSessionGeneration++;clearAccounts();stopCamera();button.disabled=true;
         try{await api('/api/owner/logout',{method:'POST',body:{}});if(!disposed)showAuth();}
-        catch(error){if(!disposed){authenticated=true;toast(errorText(error));button.disabled=false;}}
+        catch(error){if(!disposed){authenticated=true;toast(errorText(error));button.disabled=false;loadAccounts({refresh:true});}}
         break;
       }
       case'camera':startCamera();break;
@@ -544,6 +602,10 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
       case'close-modal':closeCustomer();break;
       case'review':if(customer)lookup(customer.code);break;
       case'open-search':openSearchCustomer(Number(button.dataset.owResultIndex));break;
+      case'open-account':openAccount(Number(button.dataset.owAccountIndex));break;
+      case'refresh-accounts':loadAccounts({refresh:true});break;
+      case'more-accounts':loadAccounts();break;
+      case'retry-accounts':loadAccounts();break;
       case'clear-search':clearSearch();select('[data-ow-search-input]')?.focus();break;
       case'focus-search':select('[data-ow-search-input]')?.focus();break;
       case'correct-stamps':enterCorrection();break;
@@ -578,7 +640,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
   document.addEventListener('visibilitychange',onVisibility);
   async function initializeOwner(){
     if(disposed||bootBusy)return;
-    bootBusy=true;authenticated=false;ownerSessionGeneration++;showLoading();
+    bootBusy=true;authenticated=false;ownerSessionGeneration++;clearAccounts();showLoading();
     try{
       await api('/api/status');
       if(disposed)return;
@@ -592,7 +654,7 @@ export function mountOwner({container,api,onExit,toast=()=>{},offline=false}){
   }
   initializeOwner();
   return()=>{
-    disposed=true;clearSearch();stopCamera();
+    disposed=true;clearSearch();clearAccounts();stopCamera();
     select('#owner-modal')?.close();
     container.removeEventListener('click',onClick);
     container.removeEventListener('submit',onSubmit);

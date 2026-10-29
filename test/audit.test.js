@@ -82,6 +82,70 @@ test('owner customer search is protected, bounded and normalizes name and email 
   assert.equal(JSON.stringify(bounded.value).includes('private-'), false);
 });
 
+test('owner account directory lists every account with stable pagination and only public directory fields', async t => {
+  const app = await fixture(t);
+  const signup = await app.customer('Registered');
+  const owner = await app.owner();
+  assert.equal((await app.request('/api/owner/accounts')).status, 401);
+  assert.equal((await app.request('/api/owner/accounts?limit=bad')).status, 401);
+  assert.equal((await app.request('/api/owner/accounts', { cookie: signup.cookie })).status, 401);
+  const seededIds = Array.from({ length: 57 }, (_, index) => `directory-${String(index).padStart(3, '0')}`);
+  await app.store.transaction(state => {
+    const base = signup.value.customer;
+    const seed = (id, fields) => {
+      state.customers[id] = {
+        ...structuredClone(base), id, code: String(Object.keys(state.customers).length).padStart(32, '0'), ...fields,
+        stamps: { maki: new Date().toISOString() },
+        orders: [{ id: 'private-visit' }], corrections: [{ id: 'private-correction' }],
+        cardHistory: [{ resetId: 'private-reset', stamps: {} }], rewardHistory: [], recoveryHash: 'private-recovery',
+      };
+    };
+    for (const id of [...seededIds].reverse()) seed(id, { name: `Account ${id.slice(-3)}`, email: `${id}@example.test` });
+    seed('duplicate-b', { name: 'Duplicate', email: 'duplicate-b@example.test' });
+    seed('duplicate-a', { name: 'Duplicate', email: 'duplicate-a@example.test' });
+    seed('legacy', { name: undefined, firstName: 'Legacy', lastName: 'Name', email: undefined });
+    seed('no-profile', { name: undefined, firstName: '', lastName: '', email: undefined });
+  });
+  const expectedIds = ['no-profile', ...seededIds, 'duplicate-a', 'duplicate-b', 'legacy', signup.value.customer.id];
+  const listed = [];
+  let offset = 0;
+  do {
+    const result = await app.request(`/api/owner/accounts?offset=${offset}`, { cookie: owner.cookie });
+    assert.equal(result.status, 200);assert.equal(result.value.total, expectedIds.length);
+    assert.equal(result.value.accounts.length, offset === 0 ? 50 : 12);
+    assert.equal(JSON.stringify(result.value).includes('private-'), false);
+    for (const account of result.value.accounts) assert.deepEqual(Object.keys(account).sort(), ['code', 'email', 'id', 'name']);
+    listed.push(...result.value.accounts);
+    offset = result.value.nextOffset;
+  } while (offset !== null);
+  assert.deepEqual(listed.map(account => account.id), expectedIds);
+  assert.equal(new Set(listed.map(account => account.id)).size, expectedIds.length);
+  assert.deepEqual(listed.find(account => account.id === 'legacy'), { id: 'legacy', name: 'Legacy Name', email: '', code: listed.find(account => account.id === 'legacy').code });
+  assert.equal(listed[0].name, '');assert.equal(listed[0].email, '');
+  const all = await app.request('/api/owner/accounts?limit=100', { cookie: owner.cookie });
+  assert.deepEqual(all.value.accounts, listed);assert.equal(all.value.nextOffset, null);
+  const again = await app.request('/api/owner/accounts?offset=50', { cookie: owner.cookie });
+  assert.deepEqual(again.value.accounts, listed.slice(50));
+  const pastEnd = await app.request('/api/owner/accounts?offset=999', { cookie: owner.cookie });
+  assert.deepEqual(pastEnd.value, { accounts: [], total: expectedIds.length, nextOffset: null });
+  // Listing without a query does not weaken the separate search contract.
+  assert.equal((await app.request('/api/owner/customers', { cookie: owner.cookie })).status, 400);
+});
+
+test('owner directory handles an empty store and strictly validates account page parameters', async t => {
+  const app = await fixture(t);
+  const owner = await app.owner();
+  assert.deepEqual((await app.request('/api/owner/accounts', { cookie: owner.cookie })).value, { accounts: [], total: 0, nextOffset: null });
+  const invalid = ['offset=', 'offset=-1', 'offset=1.5', 'offset=1e2', 'offset=Infinity', 'offset=9007199254740992', 'offset=%201', 'offset=%2B1', 'limit=', 'limit=0', 'limit=-1', 'limit=101', 'limit=1.5', 'limit=1e2', 'limit=NaN'];
+  for (const query of invalid) {
+    const result = await app.request(`/api/owner/accounts?${query}`, { cookie: owner.cookie });
+    assert.equal(result.status, 400, query);
+    assert.equal(result.value.accounts, undefined);
+  }
+  const valid = await app.request('/api/owner/accounts?offset=0&limit=1', { cookie: owner.cookie });
+  assert.equal(valid.status, 200);assert.deepEqual(valid.value, { accounts: [], total: 0, nextOffset: null });
+});
+
 test('thirty distinct parallel confirmations of one square produce one stamp and one direct visit', async t => {
   const app = await fixture(t);
   const customer = await app.customer('ConcurrentAudit');

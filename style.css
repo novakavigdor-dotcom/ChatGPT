@@ -62,7 +62,11 @@ body.signup-open:after{content:'';position:fixed;inset:0;z-index:40;background:#
 .pdf-reward-strip strong{font-size:clamp(18px,3.8vw,44px);font-weight:900;line-height:1.15;display:block;letter-spacing:.3px}
 .pdf-reward-strip b{font-size:clamp(18px,3.8vw,44px);font-weight:900;line-height:1.15;display:block}
 .bingo-rules{text-align:center;padding:0 28px}
-.bingo-rules>p{font-size:15px;color:#292929;margin:10px 0 0;line-height:1.4}
+.bingo-discount-details{max-width:720px;margin:18px auto 12px;text-align:left;color:#292929}
+.bingo-discount-details h2{font-size:19px;line-height:1.3;margin:0 0 10px;font-weight:800}
+.bingo-discount-details ul{margin:0;padding-left:21px;font-size:15px;line-height:1.6}
+.bingo-discount-details li+li{margin-top:8px}
+.bingo-discount-details strong{font-weight:800}
 .bingo-rules>small{display:block;font-size:15px;color:#292929;line-height:1.4}
 .bingo-rules>small>span{display:block}
 .bingo-rules>a{display:block;color:#a30d1b;font-size:36px;font-weight:850;text-decoration:none;margin:4px auto 5px}
@@ -107,7 +111,9 @@ body.signup-open:after{content:'';position:fixed;inset:0;z-index:40;background:#
   .pdf-reward-strip strong{font-size:clamp(14px,3.5vw,19px);letter-spacing:0;line-height:1.2}
   .pdf-reward-strip b{font-size:clamp(14px,3.5vw,19px);line-height:1.2}
   .bingo-rules{padding:0 12px}
-  .bingo-rules>p{font-size:10px;line-height:1.5;margin:8px 0 0}
+  .bingo-discount-details{margin:14px auto 12px}
+  .bingo-discount-details h2{font-size:16px;margin-bottom:8px}
+  .bingo-discount-details ul{font-size:12px;line-height:1.5;padding-left:18px}
   .bingo-rules>small{font-size:10px;line-height:1.5}
   .bingo-rules>a{font-size:23px;margin:4px auto 2px}
   .menu-bingo .card-bottom{margin:0 11px;padding:12px 0;font-size:7px}
